@@ -3,7 +3,7 @@ import Foundation
 // MARK: - ValidationError
 
 /// Typed errors for API key validation against CAST AI.
-enum ValidationError: LocalizedError, Sendable {
+public enum ValidationError: LocalizedError, Sendable {
     /// The API key was rejected (HTTP 401 or 403).
     case invalidKey
     /// A network-level error occurred (no connectivity, DNS failure, timeout, etc.).
@@ -11,7 +11,7 @@ enum ValidationError: LocalizedError, Sendable {
     /// The server returned an unexpected HTTP status code.
     case serverError(Int)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .invalidKey:
             return "Invalid API key. Please check the key and try again."
@@ -32,7 +32,7 @@ enum ValidationError: LocalizedError, Sendable {
 /// as typed `ValidationError` values.
 ///
 /// This is a stateless utility — all state lives in the arguments and return value.
-struct APIKeyValidator: Sendable {
+public struct APIKeyValidator: Sendable {
 
     /// The endpoint used to validate the API key.
     private static let validationURL = URL(
@@ -43,7 +43,7 @@ struct APIKeyValidator: Sendable {
     ///
     /// - Parameter apiKey: The key to validate. Never logged or included in error messages.
     /// - Returns: `.success(())` if the key is valid, `.failure(ValidationError)` otherwise.
-    static func validate(apiKey: String) async -> Result<Void, ValidationError> {
+    public static func validate(apiKey: String) async -> Result<Void, ValidationError> {
         var request = URLRequest(url: validationURL)
         request.httpMethod = "GET"
         request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")

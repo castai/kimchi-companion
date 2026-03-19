@@ -4,14 +4,16 @@ import SwiftUI
 ///
 /// Reads `AppState` from the environment and sets `hasAPIKey` / `isConnected`
 /// on successful validation + Keychain save.
-struct SetupView: View {
+public struct SetupView: View {
     @Environment(AppState.self) private var appState
 
     @State private var apiKeyText: String = ""
     @State private var isValidating: Bool = false
     @State private var errorMessage: String? = nil
 
-    var body: some View {
+    public init() {}
+
+    public var body: some View {
         VStack(spacing: 12) {
             Text("Enter your CAST AI API key")
                 .font(.subheadline)

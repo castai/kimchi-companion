@@ -1,3 +1,4 @@
+import KimchiCompanionCore
 import SwiftUI
 
 @main

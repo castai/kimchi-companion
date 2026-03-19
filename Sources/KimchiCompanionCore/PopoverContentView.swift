@@ -3,10 +3,12 @@ import SwiftUI
 /// Root view for the MenuBarExtra popover window.
 /// Shows SetupView when no API key is configured,
 /// or a connected placeholder when a valid key exists.
-struct PopoverContentView: View {
+public struct PopoverContentView: View {
     @Environment(AppState.self) private var appState
 
-    var body: some View {
+    public init() {}
+
+    public var body: some View {
         VStack(spacing: 16) {
             // Header
             Text("Kimchi Companion")
