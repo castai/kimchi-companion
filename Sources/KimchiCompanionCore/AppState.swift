@@ -12,6 +12,36 @@ public final class AppState {
     /// Updated automatically from usageStore.formattedTodayCost.
     public var displayCost: String = "$0.00"
 
+    /// Formatted today token count for menu bar display (e.g., "12.3K", "1.2M").
+    /// Sum of input + output tokens, compact notation.
+    public var formattedTodayTokens: String {
+        let total = usageStore.todayTokensIn + usageStore.todayTokensOut
+        guard total > 0 else { return "0" }
+
+        if total >= 1_000_000 {
+            let millions = Double(total) / 1_000_000.0
+            return String(format: "%.1fM", millions)
+        } else if total >= 1_000 {
+            let thousands = Double(total) / 1_000.0
+            return String(format: "%.1fK", thousands)
+        } else {
+            return "\(total)"
+        }
+    }
+
+    /// Text for the menu bar label based on current display mode.
+    /// Returns empty string for `.iconOnly`.
+    public var displayText: String {
+        switch preferencesStore.displayMode {
+        case .iconOnly:
+            return ""
+        case .iconAndCost:
+            return displayCost
+        case .iconAndTokens:
+            return formattedTodayTokens
+        }
+    }
+
     // MARK: - Connection State
 
     /// Whether the app has a valid connection to the OpenAI API (S02).

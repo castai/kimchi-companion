@@ -11,7 +11,11 @@ public struct MenuBarLabel: View {
         HStack(spacing: 4) {
             Image(systemName: "dollarsign.circle")
                 .opacity(appState.isStale ? 0.5 : 1.0)
-            Text(appState.displayCost)
+
+            let text = appState.displayText
+            if !text.isEmpty {
+                Text(text)
+            }
         }
     }
 }

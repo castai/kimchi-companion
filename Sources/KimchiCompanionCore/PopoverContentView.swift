@@ -107,12 +107,32 @@ public struct PopoverContentView: View {
                     }
                 }
                 .buttonStyle(.borderless)
+
+                Divider()
+
+                // Inline settings section
+                SettingsView()
             }
             .padding(.vertical, 12)
         }
         .task {
-            // Trigger refresh when popover appears
+            // Trigger refresh when popover appears, then start polling
             await appState.refreshUsageData()
+            if let apiKey = KeychainManager().retrieve() {
+                appState.usageStore.startPolling(
+                    intervalSeconds: appState.preferencesStore.refreshInterval.rawValue,
+                    apiKey: apiKey
+                )
+            }
+        }
+        .onChange(of: appState.preferencesStore.refreshInterval) { _, newInterval in
+            // Restart polling with the new interval
+            if let apiKey = KeychainManager().retrieve() {
+                appState.usageStore.startPolling(
+                    intervalSeconds: newInterval.rawValue,
+                    apiKey: apiKey
+                )
+            }
         }
     }
 
