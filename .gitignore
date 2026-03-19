@@ -1,6 +1,10 @@
 
 # ── GSD baseline (auto-generated) ──
 .gsd
+
+# Swift Package Manager
+.build/
+.swiftpm/
 .DS_Store
 Thumbs.db
 *.swp
