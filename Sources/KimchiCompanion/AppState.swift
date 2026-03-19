@@ -22,4 +22,21 @@ final class AppState {
     
     /// Whether the user has configured an API key (S02).
     var hasAPIKey: Bool = false
+
+    // MARK: - Initialization
+
+    /// Check Keychain on launch to restore persisted API key state.
+    init() {
+        if KeychainManager().retrieve() != nil {
+            hasAPIKey = true
+            isConnected = true
+            #if DEBUG
+            print("[AppState] init — restored API key from Keychain")
+            #endif
+        } else {
+            #if DEBUG
+            print("[AppState] init — no API key found in Keychain")
+            #endif
+        }
+    }
 }
