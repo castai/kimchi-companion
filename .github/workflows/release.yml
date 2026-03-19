@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Release
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Import Developer ID certificate
+        if: ${{ env.DEVELOPER_CERTIFICATE_BASE64 != '' }}
+        env:
+          DEVELOPER_CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_CERTIFICATE_BASE64 }}
+          DEVELOPER_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Decode and import certificate
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$DEVELOPER_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" \
+            -P "$DEVELOPER_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          rm -f "$CERT_PATH"
+
+          # Set keychain search list
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          # Extract Developer ID identity
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          if [ -n "$IDENTITY" ]; then
+            echo "DEVELOPER_ID_APPLICATION=$IDENTITY" >> "$GITHUB_ENV"
+            echo "::notice::Using Developer ID: $IDENTITY"
+          else
+            echo "::warning::Certificate imported but no Developer ID Application identity found"
+          fi
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Extract version from tag
+        run: |
+          echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      - name: Build and package
+        env:
+          APP_VERSION: ${{ env.VERSION }}
+        run: |
+          bash scripts/package-app.sh
+
+      - name: Notarize
+        if: ${{ env.NOTARY_APPLE_ID != '' }}
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          echo "→ Submitting DMG for notarization..."
+          xcrun notarytool submit build/KimchiCompanion.dmg \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --password "$NOTARY_PASSWORD" \
+            --wait
+
+          echo "→ Stapling app bundle..."
+          xcrun stapler staple "build/Kimchi Companion.app"
+
+          echo "→ Re-creating DMG with stapled app..."
+          rm -f build/KimchiCompanion.dmg
+          hdiutil create \
+            -volname "Kimchi Companion" \
+            -srcfolder "build/Kimchi Companion.app" \
+            -ov \
+            -format UDZO \
+            build/KimchiCompanion.dmg
+
+          echo "→ Updating SHA256 checksum..."
+          SHA256=$(shasum -a 256 build/KimchiCompanion.dmg | awk '{print $1}')
+          echo "$SHA256  KimchiCompanion.dmg" > build/KimchiCompanion.dmg.sha256
+          echo "  ✓ Notarized DMG SHA256: $SHA256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ### Homebrew (recommended)
+            ```bash
+            brew tap castai/homebrew-tap
+            brew install --cask kimchi-companion
+            ```
+
+            ### Manual download
+            1. Download `KimchiCompanion.dmg` below
+            2. Open the DMG and drag **Kimchi Companion** to Applications
+            3. Launch from Applications — it appears in the menu bar
+
+            ### Verify download integrity
+            ```bash
+            shasum -a 256 -c KimchiCompanion.dmg.sha256
+            ```
+          files: |
+            build/KimchiCompanion.dmg
+            build/KimchiCompanion.dmg.sha256
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "${KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+            echo "::notice::Temporary keychain cleaned up"
+          fi
