@@ -9,10 +9,14 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-testing.git", from: "0.12.0"),
+        .package(url: "https://github.com/sindresorhus/LaunchAtLogin-Modern.git", from: "1.0.0"),
     ],
     targets: [
         .target(
             name: "KimchiCompanionCore",
+            dependencies: [
+                .product(name: "LaunchAtLogin", package: "LaunchAtLogin-Modern"),
+            ],
             path: "Sources/KimchiCompanionCore"
         ),
         .executableTarget(

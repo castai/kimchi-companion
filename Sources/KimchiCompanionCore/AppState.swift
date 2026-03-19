@@ -28,6 +28,11 @@ public final class AppState {
     /// Owns the fetch → cache → display → stale pipeline for CAST AI usage data.
     public let usageStore = UsageStore()
 
+    // MARK: - Preferences Store
+
+    /// User-configurable preferences: refresh interval, display mode, launch-at-login.
+    public let preferencesStore = PreferencesStore()
+
     // MARK: - Initialization
 
     /// Check Keychain on launch to restore persisted API key state.

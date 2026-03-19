@@ -80,6 +80,57 @@ public final class UsageStore {
 
     public init() {}
 
+    // MARK: - Background Polling
+
+    /// Active polling task. Cancel before starting a new one or on shutdown.
+    private var pollingTask: Task<Void, Never>?
+
+    /// Start background polling that refreshes usage data at the given interval.
+    /// Cancels any existing polling task before starting a new one.
+    ///
+    /// - Parameters:
+    ///   - intervalSeconds: Seconds between refresh cycles.
+    ///   - apiKey: CAST AI API key. Never logged.
+    public func startPolling(intervalSeconds: Int, apiKey: String) {
+        stopPolling()
+
+        #if DEBUG
+        print("[UsageStore] polling started interval=\(intervalSeconds)s")
+        #endif
+
+        pollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(intervalSeconds))
+                } catch {
+                    // CancellationError — exit cleanly
+                    #if DEBUG
+                    print("[UsageStore] polling cancelled during sleep")
+                    #endif
+                    return
+                }
+
+                guard let self, !Task.isCancelled else { return }
+
+                #if DEBUG
+                print("[UsageStore] poll tick — refreshing")
+                #endif
+
+                await self.refresh(apiKey: apiKey)
+            }
+        }
+    }
+
+    /// Stop the current polling task.
+    public func stopPolling() {
+        guard pollingTask != nil else { return }
+        pollingTask?.cancel()
+        pollingTask = nil
+        #if DEBUG
+        print("[UsageStore] polling stopped")
+        #endif
+    }
+
     // MARK: - Refresh
 
     /// Main fetch orchestrator: calls both API endpoints concurrently, merges results,
