@@ -2,27 +2,29 @@ import SwiftUI
 
 /// Root view for the MenuBarExtra popover window.
 /// Shows SetupView when no API key is configured,
-/// or a minimal usage summary when connected.
+/// or the full usage dashboard when connected: stale banner, today/week sections,
+/// model breakdown, Open Dashboard link, and quit button.
 public struct PopoverContentView: View {
     @Environment(AppState.self) private var appState
 
     public init() {}
 
     public var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 0) {
             // Header
             Text("Kimchi Companion")
                 .font(.headline)
+                .padding(.bottom, 12)
 
             Divider()
 
             if !appState.hasAPIKey {
                 SetupView()
+                    .padding(.top, 12)
+                Spacer()
             } else {
-                usageSummaryView
+                usageDashboardView
             }
-
-            Spacer()
 
             Divider()
 
@@ -31,40 +33,82 @@ public struct PopoverContentView: View {
             Button("Quit Kimchi Companion") {
                 NSApplication.shared.terminate(nil)
             }
+            .padding(.top, 8)
         }
         .padding()
-        .frame(minWidth: 300, maxWidth: 300, minHeight: 200)
+        .frame(minWidth: 300, maxWidth: 300)
     }
 
-    // MARK: - Connected State — Usage Summary
+    // MARK: - Connected State — Full Usage Dashboard
 
-    private var usageSummaryView: some View {
-        VStack(spacing: 12) {
-            // Stale indicator banner
-            if appState.isStale {
-                staleBanner
-            }
+    private var usageDashboardView: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(spacing: 12) {
+                // Stale indicator banner
+                if appState.isStale {
+                    staleBanner
+                }
 
-            // Today's cost — the main metric
-            VStack(spacing: 4) {
-                Text("Today")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(appState.displayCost)
-                    .font(.system(.title, design: .rounded, weight: .semibold))
-                    .monospacedDigit()
-            }
+                // Today section
+                UsageView(
+                    title: "Today",
+                    cost: appState.usageStore.todayCost,
+                    tokensIn: appState.usageStore.todayTokensIn,
+                    tokensOut: appState.usageStore.todayTokensOut,
+                    requests: appState.usageStore.todayRequests
+                )
 
-            // Loading indicator
-            if appState.usageStore.isLoading {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Refreshing…")
-                        .font(.caption)
+                Divider()
+
+                // This Week section
+                UsageView(
+                    title: "This Week",
+                    cost: appState.usageStore.weekCost,
+                    tokensIn: appState.usageStore.weekTokensIn,
+                    tokensOut: appState.usageStore.weekTokensOut,
+                    requests: appState.usageStore.weekRequests
+                )
+
+                Divider()
+
+                // Per-model cost breakdown (renders nothing when empty)
+                ModelBreakdownView(
+                    models: appState.usageStore.cachedData?.modelBreakdown ?? []
+                )
+
+                // Loading indicator
+                if appState.usageStore.isLoading {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Refreshing…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                // Last updated timestamp
+                if let lastUpdated = appState.usageStore.lastUpdated {
+                    Text("Updated \(lastUpdated, style: .relative) ago")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+
+                Divider()
+
+                // Open Dashboard link
+                Button {
+                    NSWorkspace.shared.open(URL(string: "https://inference.cast.ai")!)
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Open Dashboard")
+                        Image(systemName: "arrow.up.right")
+                            .font(.caption)
+                    }
+                }
+                .buttonStyle(.borderless)
             }
+            .padding(.vertical, 12)
         }
         .task {
             // Trigger refresh when popover appears

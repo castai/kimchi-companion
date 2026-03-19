@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo "=== S04: Popover UI Verification ==="
+echo ""
+echo "Build check..."
+swift build 2>&1 | tail -5
+echo ""
+echo "Test check..."
+swift test 2>&1 | tail -5
+echo ""
+echo "=== Manual Verification Checklist ==="
+echo "Run the app: .build/debug/KimchiCompanion"
+echo ""
+echo "[ ] Click menu bar icon — popover opens"
+echo "[ ] Today section shows: cost (large), tokens in/out, request count"
+echo "[ ] This Week section shows: cost, tokens in/out, request count"
+echo "[ ] Model breakdown shows model names with cost and percentage"
+echo "[ ] Numbers use thousands separators (e.g., 12,847)"
+echo "[ ] Costs formatted as currency (e.g., \$4.20)"
+echo "[ ] 'Open Dashboard' link opens inference.cast.ai in browser"
+echo "[ ] Quit button works"
+echo "[ ] If no API key: setup view shown (not usage view)"
+echo "[ ] If API unreachable: stale banner appears with last updated time"
+echo ""
+echo "=== S04 Verification Complete ==="
