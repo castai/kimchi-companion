@@ -4,12 +4,13 @@ import SwiftUI
 /// Reads `AppState` from the environment so it updates reactively.
 public struct MenuBarLabel: View {
     @Environment(AppState.self) private var appState
-    
+
     public init() {}
-    
+
     public var body: some View {
         HStack(spacing: 4) {
             Image(systemName: "dollarsign.circle")
+                .opacity(appState.isStale ? 0.5 : 1.0)
             Text(appState.displayCost)
         }
     }
