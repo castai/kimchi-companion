@@ -12,6 +12,12 @@ public final class AppState {
     /// Updated automatically from usageStore.formattedTodayCost.
     public var displayCost: String = "$0.00"
 
+    /// Currently selected usage scope for the popover view.
+    public var selectedScope: UsageScope = .global
+
+    /// Currently selected individual API key ID (when scope is .individual).
+    public var selectedKeyId: String?
+
     /// Formatted today token count for menu bar display (e.g., "12.3K", "1.2M").
     /// Sum of input + output tokens, compact notation.
     public var formattedTodayTokens: String {
@@ -82,6 +88,10 @@ public final class AppState {
                 #if DEBUG
                 print("[AppState] init — restored API key from Keychain, no cache on disk")
                 #endif
+            }
+            // Trigger initial data refresh
+            Task {
+                await refreshUsageData()
             }
         } else {
             #if DEBUG

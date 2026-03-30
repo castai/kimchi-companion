@@ -42,6 +42,25 @@ public enum DisplayMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+// MARK: - UsageScope
+
+/// Controls the data scope shown in the popover: org-wide, all API keys, or a single key.
+public enum UsageScope: String, CaseIterable, Identifiable, Sendable {
+    case global
+    case team
+    case individual
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .global: "Global"
+        case .team: "Team"
+        case .individual: "Individual"
+        }
+    }
+}
+
 // MARK: - PreferencesStore
 
 /// Persists user preferences to UserDefaults. Uses manual read/write instead of

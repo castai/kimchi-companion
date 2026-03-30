@@ -89,6 +89,48 @@ public struct CastAPIClient: Sendable {
         return try await performRequest(path: path, queryItems: queryItems, apiKey: apiKey)
     }
 
+    /// Fetch the recommendations report for a time range.
+    ///
+    /// Returns achieved savings, potential savings, and per-model recommendations.
+    ///
+    /// - Parameters:
+    ///   - apiKey: CAST AI API key. Never logged.
+    ///   - from: Start of the reporting period (inclusive).
+    ///   - to: End of the reporting period (exclusive).
+    /// - Returns: Decoded recommendations report response.
+    /// - Throws: `APIClientError` on network, auth, server, or decoding failure.
+    public static func fetchRecommendationsReport(
+        apiKey: String,
+        from: Date,
+        to: Date
+    ) async throws -> RecommendationsReportResponse {
+        let path = "/v1/llm/openai/chat-completions/reports/recommendations"
+        let queryItems = timeRangeQueryItems(from: from, to: to)
+        return try await performRequest(path: path, queryItems: queryItems, apiKey: apiKey)
+    }
+
+    /// Fetch usage detail for a specific API key.
+    ///
+    /// Returns time-series usage data including token counts and request counts.
+    ///
+    /// - Parameters:
+    ///   - apiKey: CAST AI API key for authentication. Never logged.
+    ///   - apiKeyId: The specific API key ID to fetch usage for.
+    ///   - from: Start of the reporting period (inclusive).
+    ///   - to: End of the reporting period (exclusive).
+    /// - Returns: Decoded per-key usage report response.
+    /// - Throws: `APIClientError` on network, auth, server, or decoding failure.
+    public static func fetchAPIKeyUsage(
+        apiKey: String,
+        apiKeyId: String,
+        from: Date,
+        to: Date
+    ) async throws -> APIKeyUsageReportResponse {
+        let path = "/v1/llm/openai/chat-completions/reports/api-keys/\(apiKeyId)/usage"
+        let queryItems = timeRangeQueryItems(from: from, to: to)
+        return try await performRequest(path: path, queryItems: queryItems, apiKey: apiKey)
+    }
+
     // MARK: - Internal
 
     /// Build ISO 8601 query items for the time range parameters.

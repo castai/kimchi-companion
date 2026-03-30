@@ -2,8 +2,8 @@ import SwiftUI
 
 /// Root view for the MenuBarExtra popover window.
 /// Shows SetupView when no API key is configured,
-/// or the full usage dashboard when connected: stale banner, today/week sections,
-/// model breakdown, Open Dashboard link, and quit button.
+/// or the full usage dashboard when connected: scope picker, usage sections,
+/// module breakdown, per-key breakdown, Open Dashboard link, and quit button.
 public struct PopoverContentView: View {
     @Environment(AppState.self) private var appState
 
@@ -36,45 +36,33 @@ public struct PopoverContentView: View {
             .padding(.top, 8)
         }
         .padding()
-        .frame(minWidth: 300, maxWidth: 300)
+        .frame(minWidth: 320, maxWidth: 320)
     }
 
     // MARK: - Connected State — Full Usage Dashboard
 
     private var usageDashboardView: some View {
-        ScrollView(.vertical, showsIndicators: false) {
+        @Bindable var state = appState
+
+        return ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 12) {
                 // Stale indicator banner
                 if appState.isStale {
                     staleBanner
                 }
 
-                // Today section
-                UsageView(
-                    title: "Today",
-                    cost: appState.usageStore.todayCost,
-                    tokensIn: appState.usageStore.todayTokensIn,
-                    tokensOut: appState.usageStore.todayTokensOut,
-                    requests: appState.usageStore.todayRequests
-                )
+                // Scope picker: Global / Team / Individual
+                scopePicker
 
-                Divider()
-
-                // This Week section
-                UsageView(
-                    title: "This Week",
-                    cost: appState.usageStore.weekCost,
-                    tokensIn: appState.usageStore.weekTokensIn,
-                    tokensOut: appState.usageStore.weekTokensOut,
-                    requests: appState.usageStore.weekRequests
-                )
-
-                Divider()
-
-                // Per-model cost breakdown (renders nothing when empty)
-                ModelBreakdownView(
-                    models: appState.usageStore.cachedData?.modelBreakdown ?? []
-                )
+                // Content based on scope
+                switch appState.selectedScope {
+                case .global:
+                    globalScopeView
+                case .team:
+                    teamScopeView
+                case .individual:
+                    individualScopeView
+                }
 
                 // Loading indicator
                 if appState.usageStore.isLoading {
@@ -98,7 +86,7 @@ public struct PopoverContentView: View {
 
                 // Open Dashboard link
                 Button {
-                    NSWorkspace.shared.open(URL(string: "https://inference.cast.ai")!)
+                    NSWorkspace.shared.open(URL(string: "https://kimchi.console.cast.ai")!)
                 } label: {
                     HStack(spacing: 4) {
                         Text("Open Dashboard")
@@ -134,6 +122,148 @@ public struct PopoverContentView: View {
                 )
             }
         }
+    }
+
+    // MARK: - Scope Picker
+
+    private var scopePicker: some View {
+        @Bindable var state = appState
+
+        return Picker("Scope", selection: $state.selectedScope) {
+            ForEach(UsageScope.allCases) { scope in
+                Text(scope.displayName).tag(scope)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    // MARK: - Global Scope (Org-wide)
+
+    private var globalScopeView: some View {
+        VStack(spacing: 12) {
+            // Savings summary banner
+            if let savings = appState.usageStore.cachedData?.savingsSummary {
+                SavingsView(savings: savings)
+                Divider()
+            }
+
+            // Today section
+            UsageView(
+                title: "Today",
+                cost: appState.usageStore.todayCost,
+                tokensIn: appState.usageStore.todayTokensIn,
+                tokensOut: appState.usageStore.todayTokensOut,
+                requests: appState.usageStore.todayRequests
+            )
+
+            Divider()
+
+            // This Week section
+            UsageView(
+                title: "This Week",
+                cost: appState.usageStore.weekCost,
+                tokensIn: appState.usageStore.weekTokensIn,
+                tokensOut: appState.usageStore.weekTokensOut,
+                requests: appState.usageStore.weekRequests
+            )
+
+            Divider()
+
+            // Per-category cost breakdown (modules)
+            CategoryBreakdownView(
+                categories: appState.usageStore.cachedData?.categoryBreakdown ?? []
+            )
+
+            // Per-model cost breakdown
+            ModelBreakdownView(
+                models: appState.usageStore.cachedData?.modelBreakdown ?? []
+            )
+        }
+    }
+
+    // MARK: - Team Scope (All API Keys)
+
+    private var teamScopeView: some View {
+        let keys = appState.usageStore.cachedData?.keyBreakdown ?? []
+
+        return VStack(spacing: 12) {
+            // Aggregated team totals (same as global)
+            UsageView(
+                title: "Team Total",
+                cost: appState.usageStore.weekCost,
+                tokensIn: appState.usageStore.weekTokensIn,
+                tokensOut: appState.usageStore.weekTokensOut,
+                requests: appState.usageStore.weekRequests
+            )
+
+            Divider()
+
+            // Per-key breakdown
+            if keys.isEmpty {
+                Text("No API key data available")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                KeyBreakdownView(keys: keys)
+            }
+        }
+    }
+
+    // MARK: - Individual Scope (Single Key)
+
+    private var individualScopeView: some View {
+        let keys = appState.usageStore.cachedData?.keyBreakdown ?? []
+
+        return VStack(spacing: 12) {
+            if keys.isEmpty {
+                Text("No API key data available")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                // Key selector
+                keyPicker(keys: keys)
+
+                // Show selected key's data
+                if let selectedKey = selectedKeyEntry(from: keys) {
+                    UsageView(
+                        title: selectedKey.displayName,
+                        cost: selectedKey.costDecimal,
+                        tokensIn: selectedKey.tokensIn,
+                        tokensOut: selectedKey.tokensOut,
+                        requests: selectedKey.requests
+                    )
+                } else {
+                    Text("Select an API key")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func keyPicker(keys: [APIKeyUsageEntry]) -> some View {
+        @Bindable var state = appState
+
+        return Picker("API Key", selection: $state.selectedKeyId) {
+            Text("Select key…").tag(nil as String?)
+            ForEach(keys, id: \.id) { key in
+                Text(key.displayName).tag(key.id as String?)
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .onAppear {
+            // Auto-select first key if none selected
+            if appState.selectedKeyId == nil, let first = keys.first {
+                appState.selectedKeyId = first.id
+            }
+        }
+    }
+
+    private func selectedKeyEntry(from keys: [APIKeyUsageEntry]) -> APIKeyUsageEntry? {
+        guard let id = appState.selectedKeyId else { return keys.first }
+        return keys.first { $0.id == id } ?? keys.first
     }
 
     // MARK: - Stale Banner

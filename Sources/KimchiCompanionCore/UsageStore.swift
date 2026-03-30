@@ -133,7 +133,7 @@ public final class UsageStore {
 
     // MARK: - Refresh
 
-    /// Main fetch orchestrator: calls both API endpoints concurrently, merges results,
+    /// Main fetch orchestrator: calls all API endpoints concurrently, merges results,
     /// writes cache to disk, and updates state. On failure, sets stale and preserves
     /// existing cached data.
     ///
@@ -158,27 +158,43 @@ public final class UsageStore {
         let weekComponents = utcCalendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
         let weekStart = utcCalendar.date(from: weekComponents) ?? todayStart
 
-        // Fetch both endpoints concurrently
-        var usageReport: UsageReportResponse?
+        // Fetch all endpoints concurrently
+        // Usage report is called twice: once for today, once for the week
+        var todayUsageReport: UsageReportResponse?
+        var weekUsageReport: UsageReportResponse?
         var savingsReport: SavingsReportResponse?
+        var recommendationsReport: RecommendationsReportResponse?
         var fetchError: Error?
 
-        // Use async let for concurrent execution
         do {
-            async let usageTask = CastAPIClient.fetchUsageReport(
+            async let todayUsageTask = CastAPIClient.fetchUsageReport(
                 apiKey: apiKey, from: todayStart, to: now
+            )
+            async let weekUsageTask = CastAPIClient.fetchUsageReport(
+                apiKey: apiKey, from: weekStart, to: now
             )
             async let savingsTask = CastAPIClient.fetchSavingsReport(
                 apiKey: apiKey, from: weekStart, to: now
             )
+            async let recsTask = CastAPIClient.fetchRecommendationsReport(
+                apiKey: apiKey, from: weekStart, to: now
+            )
 
-            // Await both — if one fails we still want the other
             do {
-                usageReport = try await usageTask
+                todayUsageReport = try await todayUsageTask
             } catch {
                 fetchError = error
                 #if DEBUG
-                print("[UsageStore] usage report fetch failed: \(error.localizedDescription)")
+                print("[UsageStore] today usage report fetch failed: \(error.localizedDescription)")
+                #endif
+            }
+
+            do {
+                weekUsageReport = try await weekUsageTask
+            } catch {
+                fetchError = error
+                #if DEBUG
+                print("[UsageStore] week usage report fetch failed: \(error.localizedDescription)")
                 #endif
             }
 
@@ -190,22 +206,73 @@ public final class UsageStore {
                 print("[UsageStore] savings report fetch failed: \(error.localizedDescription)")
                 #endif
             }
+
+            do {
+                recommendationsReport = try await recsTask
+            } catch {
+                // Recommendations is non-critical
+                #if DEBUG
+                print("[UsageStore] recommendations fetch failed: \(error.localizedDescription)")
+                #endif
+            }
         }
 
-        // If both failed, mark stale and bail
-        if usageReport == nil && savingsReport == nil {
+        // If both usage reports failed, mark stale and bail
+        if todayUsageReport == nil && weekUsageReport == nil {
             isStale = true
-            lastError = fetchError?.localizedDescription ?? "Both API calls failed"
+            lastError = fetchError?.localizedDescription ?? "Usage API calls failed"
             #if DEBUG
-            print("[UsageStore] fetch failure — both endpoints failed, isStale=true")
+            print("[UsageStore] fetch failure — usage endpoints failed, isStale=true")
             #endif
             return
         }
 
+        // Fetch per-key usage for token counts.
+        // Extract key IDs from the week usage report's costPerApiKey field.
+        var perKeyUsage: [String: APIKeyUsageReportResponse] = [:]
+        if let items = weekUsageReport?.items {
+            var allKeyIds: Set<String> = []
+            for item in items {
+                for keyId in (item.costPerApiKey ?? [:]).keys {
+                    allKeyIds.insert(keyId)
+                }
+            }
+
+            // Fetch each key's usage concurrently (limit to 10 to avoid flooding)
+            let keyIds = Array(allKeyIds.prefix(10))
+            await withTaskGroup(of: (String, APIKeyUsageReportResponse?).self) { group in
+                for keyId in keyIds {
+                    group.addTask {
+                        do {
+                            let report = try await CastAPIClient.fetchAPIKeyUsage(
+                                apiKey: apiKey, apiKeyId: keyId, from: weekStart, to: now
+                            )
+                            return (keyId, report)
+                        } catch {
+                            #if DEBUG
+                            print("[UsageStore] per-key usage fetch failed for \(keyId.prefix(8))…: \(error.localizedDescription)")
+                            #endif
+                            return (keyId, nil)
+                        }
+                    }
+                }
+                for await (keyId, report) in group {
+                    if let report { perKeyUsage[keyId] = report }
+                }
+            }
+
+            #if DEBUG
+            print("[UsageStore] fetched per-key usage for \(perKeyUsage.count)/\(keyIds.count) keys")
+            #endif
+        }
+
         // Merge responses into CachedUsageData
         let data = mergeResponses(
-            usage: usageReport,
+            todayUsage: todayUsageReport,
+            weekUsage: weekUsageReport,
             savings: savingsReport,
+            recommendations: recommendationsReport,
+            perKeyUsage: perKeyUsage,
             now: now
         )
 
@@ -219,7 +286,7 @@ public final class UsageStore {
         lastError = nil
 
         #if DEBUG
-        print("[UsageStore] fetch success — todayCost=\(data.todayCost), weekCost=\(data.weekCost), items=\(data.modelBreakdown.count)")
+        print("[UsageStore] fetch success — todayCost=\(data.todayCost), weekCost=\(data.weekCost), categories=\(data.categoryBreakdown.count), savings=\(data.savingsSummary != nil)")
         #endif
     }
 
@@ -282,37 +349,147 @@ public final class UsageStore {
 
     // MARK: - Response Merging
 
-    /// Merge usage and savings reports into the unified cached structure.
+    /// Merge today usage, week usage, savings, recommendations, and per-key data into cached structure.
     private func mergeResponses(
-        usage: UsageReportResponse?,
+        todayUsage: UsageReportResponse?,
+        weekUsage: UsageReportResponse?,
         savings: SavingsReportResponse?,
+        recommendations: RecommendationsReportResponse?,
+        perKeyUsage: [String: APIKeyUsageReportResponse],
         now: Date
     ) -> CachedUsageData {
-        // Today's cost from usage report: sum of all items' daily costs
-        let todayCostDecimal = usage?.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal } ?? .zero
+        // Today's cost from today's usage report: sum of all items' daily costs
+        let todayCostDecimal = todayUsage?.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal } ?? .zero
 
-        // Week cost: sum all savings items' total costs (covers the week window)
-        let weekCostDecimal = savings?.items.reduce(Decimal.zero) { $0 + $1.costs.totalDecimal } ?? .zero
+        // Week cost from week's usage report: sum of all items' daily costs
+        let weekCostDecimal = weekUsage?.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal } ?? .zero
 
-        // Token counts from savings report (aggregated across all keys)
-        let todayTokensIn = savings?.items.reduce(0) { $0 + $1.tokenCount.in } ?? 0
-        let todayTokensOut = savings?.items.reduce(0) { $0 + $1.tokenCount.out } ?? 0
-        let todayRequests = savings?.items.reduce(0) { $0 + $1.requestCount } ?? 0
+        // Token counts: aggregate from per-key usage reports (most accurate source)
+        // Falls back to savings report if per-key data is empty
+        var weekTokensIn = 0
+        var weekTokensOut = 0
+        var weekRequests = 0
 
-        // For week tokens, we use the same savings data (it covers the week window)
-        let weekTokensIn = todayTokensIn
-        let weekTokensOut = todayTokensOut
-        let weekRequests = todayRequests
+        if !perKeyUsage.isEmpty {
+            for (_, report) in perKeyUsage {
+                for item in report.items {
+                    weekTokensIn += item.tokenCount?.in ?? 0
+                    weekTokensOut += item.tokenCount?.out ?? 0
+                    weekRequests += item.requestCount ?? 0
+                }
+            }
+        } else if let savingsItems = savings?.items, !savingsItems.isEmpty {
+            weekTokensIn = savingsItems.reduce(0) { $0 + $1.tokenCount.in }
+            weekTokensOut = savingsItems.reduce(0) { $0 + $1.tokenCount.out }
+            weekRequests = savingsItems.reduce(0) { $0 + $1.requestCount }
+        }
 
-        // Model breakdown from usage report's per-category breakdown or savings per-key
+        // Today's tokens: sum per-key usage items that fall on today only
+        var todayTokensIn = 0
+        var todayTokensOut = 0
+        var todayRequests = 0
+
+        let todayDatePrefix = Self.todayDatePrefix(now)
+        if !perKeyUsage.isEmpty {
+            for (_, report) in perKeyUsage {
+                for item in report.items {
+                    if item.timestamp.hasPrefix(todayDatePrefix) {
+                        todayTokensIn += item.tokenCount?.in ?? 0
+                        todayTokensOut += item.tokenCount?.out ?? 0
+                        todayRequests += item.requestCount ?? 0
+                    }
+                }
+            }
+        } else {
+            // Fallback: use week totals (same as before)
+            todayTokensIn = weekTokensIn
+            todayTokensOut = weekTokensOut
+            todayRequests = weekRequests
+        }
+
+        // Model breakdown from today's usage report's per-category or per-key data
         var breakdown: [ModelCostEntry] = []
-        if let categories = usage?.items.first?.costPerCategory {
+        if let categories = todayUsage?.items.first?.costPerCategory {
             breakdown = categories.map { ModelCostEntry(name: $0.key, cost: $0.value) }
                 .sorted { ($0.costDecimal) > ($1.costDecimal) }
         } else if let items = savings?.items, !items.isEmpty {
             breakdown = items.map {
                 ModelCostEntry(name: $0.alias ?? $0.id, cost: $0.costs.total)
             }.sorted { $0.costDecimal > $1.costDecimal }
+        }
+
+        // Per-API-key breakdown: prefer per-key usage data, fall back to savings report
+        var keyBreakdown: [APIKeyUsageEntry] = []
+        if !perKeyUsage.isEmpty {
+            // Build from per-key usage + costPerApiKey for display names
+            // Get key aliases from savings report if available
+            let aliasMap: [String: String] = Dictionary(
+                uniqueKeysWithValues: (savings?.items ?? []).map { ($0.id, $0.alias ?? $0.id) }
+            )
+            for (keyId, report) in perKeyUsage {
+                let totalCost = report.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal }
+                let totalTokensIn = report.items.reduce(0) { $0 + ($1.tokenCount?.in ?? 0) }
+                let totalTokensOut = report.items.reduce(0) { $0 + ($1.tokenCount?.out ?? 0) }
+                let totalRequests = report.items.reduce(0) { $0 + ($1.requestCount ?? 0) }
+                let displayName = aliasMap[keyId] ?? String(keyId.prefix(12))
+                keyBreakdown.append(APIKeyUsageEntry(
+                    id: keyId,
+                    displayName: displayName,
+                    cost: "\(totalCost)",
+                    tokensIn: totalTokensIn,
+                    tokensOut: totalTokensOut,
+                    requests: totalRequests
+                ))
+            }
+            keyBreakdown.sort { $0.costDecimal > $1.costDecimal }
+        } else if let items = savings?.items, !items.isEmpty {
+            keyBreakdown = items.map { item in
+                let displayName = item.alias ?? String(item.id.prefix(12))
+                return APIKeyUsageEntry(
+                    id: item.id,
+                    displayName: displayName,
+                    cost: item.costs.total,
+                    tokensIn: item.tokenCount.in,
+                    tokensOut: item.tokenCount.out,
+                    requests: item.requestCount
+                )
+            }.sorted { $0.costDecimal > $1.costDecimal }
+        }
+
+        // Category breakdown from week's usage report (aggregated across all daily items)
+        var categoryBreakdown: [CategoryCostEntry] = []
+        if let items = weekUsage?.items {
+            var categoryTotals: [String: Decimal] = [:]
+            for item in items {
+                for (category, costStr) in (item.costPerCategory ?? [:]) {
+                    let cost = Decimal(string: costStr) ?? .zero
+                    categoryTotals[category, default: .zero] += cost
+                }
+            }
+            categoryBreakdown = categoryTotals.map { CategoryCostEntry(name: $0.key, cost: "\($0.value)") }
+                .sorted { $0.costDecimal > $1.costDecimal }
+        }
+
+        // Savings summary from recommendations report
+        var savingsSummary: CachedSavingsSummary?
+        if let summary = recommendations?.summary {
+            let actualCost = summary.costs?.total ?? "0"
+            let originalCost = summary.originalCost ?? "0"
+            let achievedSavings = summary.achievedSavings ?? "0"
+            let achievedPct = summary.achievedSavingsPercentage ?? "0"
+            let recommendedCost = summary.recommendedModelCosts?.total ?? actualCost
+            let actualDec = Decimal(string: actualCost) ?? .zero
+            let recommendedDec = Decimal(string: recommendedCost) ?? .zero
+            let potentialSavings = max(.zero, actualDec - recommendedDec)
+
+            savingsSummary = CachedSavingsSummary(
+                actualCost: actualCost,
+                originalCost: originalCost,
+                achievedSavings: achievedSavings,
+                achievedSavingsPercentage: achievedPct,
+                recommendedCost: recommendedCost,
+                potentialSavings: "\(potentialSavings)"
+            )
         }
 
         return CachedUsageData(
@@ -325,7 +502,19 @@ public final class UsageStore {
             weekTokensOut: weekTokensOut,
             weekRequests: weekRequests,
             modelBreakdown: breakdown,
+            keyBreakdown: keyBreakdown,
+            categoryBreakdown: categoryBreakdown,
+            savingsSummary: savingsSummary,
             lastUpdated: now
         )
+    }
+
+    // MARK: - Helpers
+
+    /// Returns the UTC date prefix (e.g. "2026-03-20") for filtering today's items from time-series data.
+    private static func todayDatePrefix(_ now: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withFullDate]
+        return formatter.string(from: now)  // "2026-03-20"
     }
 }

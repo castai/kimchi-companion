@@ -19,6 +19,10 @@ struct KimchiCompanionApp: App {
         } label: {
             MenuBarLabel()
                 .environment(appState)
+                .task {
+                    // Trigger initial refresh on app launch
+                    await appState.refreshUsageData()
+                }
         }
         .menuBarExtraStyle(.window)
     }

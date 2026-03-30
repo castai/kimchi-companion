@@ -126,7 +126,7 @@ public struct TokenCount: Codable, Sendable, Equatable {
 }
 
 /// Cost breakdown for a single savings report item.
-public struct SavingsItemCosts: Codable, Sendable {
+public struct SavingsItemCosts: Codable, Sendable, Equatable {
     /// Daily cost as a string.
     public let daily: String
     /// Total cost as a string.
@@ -172,7 +172,7 @@ public struct SavingsItemCosts: Codable, Sendable {
 }
 
 /// Recommended model cost suggestion from CAST AI.
-public struct RecommendedModelCosts: Codable, Sendable {
+public struct RecommendedModelCosts: Codable, Sendable, Equatable {
     /// Recommended daily cost as a string.
     public let daily: String
     /// Recommended total cost as a string.
@@ -181,6 +181,151 @@ public struct RecommendedModelCosts: Codable, Sendable {
     public init(daily: String, total: String) {
         self.daily = daily
         self.total = total
+    }
+}
+
+// MARK: - Per-Key Usage Report
+
+/// Top-level response from `GET /v1/llm/openai/chat-completions/reports/api-keys/{id}/usage`.
+public struct APIKeyUsageReportResponse: Codable, Sendable {
+    /// Time bucket size in seconds.
+    public let stepSeconds: Int?
+    /// Daily usage items for this key.
+    public let items: [APIKeyUsageItem]
+
+    public init(stepSeconds: Int? = nil, items: [APIKeyUsageItem]) {
+        self.stepSeconds = stepSeconds
+        self.items = items
+    }
+}
+
+/// A single daily usage bucket for a specific API key.
+public struct APIKeyUsageItem: Codable, Sendable {
+    /// ISO 8601 timestamp.
+    public let timestamp: String
+    /// Daily cost as a string.
+    public let dailyCost: String
+    /// Cost per million tokens.
+    public let dailyCostPerMilTokens: String?
+    /// Request count.
+    public let requestCount: Int?
+    /// Token counts.
+    public let tokenCount: TokenCount?
+
+    public init(
+        timestamp: String,
+        dailyCost: String,
+        dailyCostPerMilTokens: String? = nil,
+        requestCount: Int? = nil,
+        tokenCount: TokenCount? = nil
+    ) {
+        self.timestamp = timestamp
+        self.dailyCost = dailyCost
+        self.dailyCostPerMilTokens = dailyCostPerMilTokens
+        self.requestCount = requestCount
+        self.tokenCount = tokenCount
+    }
+
+    public var dailyCostDecimal: Decimal {
+        Decimal(string: dailyCost) ?? .zero
+    }
+}
+
+// MARK: - Recommendations Report
+
+/// Top-level response from `GET /v1/llm/openai/chat-completions/reports/recommendations`.
+public struct RecommendationsReportResponse: Codable, Sendable {
+    /// Whether the organization has completed onboarding.
+    public let isOnboarded: Bool?
+    /// Aggregated savings summary across all models.
+    public let summary: RecommendationsSummary?
+    /// Per-model recommendation items.
+    public let items: [RecommendationsItem]
+
+    public init(isOnboarded: Bool? = nil, summary: RecommendationsSummary? = nil, items: [RecommendationsItem]) {
+        self.isOnboarded = isOnboarded
+        self.summary = summary
+        self.items = items
+    }
+}
+
+/// Aggregated savings summary from the recommendations report.
+public struct RecommendationsSummary: Codable, Sendable, Equatable {
+    /// Current actual costs.
+    public let costs: SavingsItemCosts?
+    /// What costs would be with recommended models.
+    public let recommendedModelCosts: RecommendedModelCosts?
+    /// Original cost before any optimization as a string.
+    public let originalCost: String?
+    /// Absolute savings achieved as a string.
+    public let achievedSavings: String?
+    /// Savings as a percentage string (e.g., "15.0").
+    public let achievedSavingsPercentage: String?
+
+    public init(
+        costs: SavingsItemCosts? = nil,
+        recommendedModelCosts: RecommendedModelCosts? = nil,
+        originalCost: String? = nil,
+        achievedSavings: String? = nil,
+        achievedSavingsPercentage: String? = nil
+    ) {
+        self.costs = costs
+        self.recommendedModelCosts = recommendedModelCosts
+        self.originalCost = originalCost
+        self.achievedSavings = achievedSavings
+        self.achievedSavingsPercentage = achievedSavingsPercentage
+    }
+}
+
+/// A single model recommendation item.
+public struct RecommendationsItem: Codable, Sendable, Equatable {
+    /// Recommendation ID.
+    public let id: String
+    /// Category name for this recommendation.
+    public let category: String?
+    /// Request count in the period.
+    public let requestCount: Int?
+    /// Token counts.
+    public let tokenCount: TokenCount?
+    /// Actual costs.
+    public let costs: SavingsItemCosts?
+    /// Recommended model costs.
+    public let recommendedModelCosts: RecommendedModelCosts?
+    /// Original cost before optimization.
+    public let originalCost: String?
+    /// Absolute savings achieved.
+    public let achievedSavings: String?
+    /// Savings percentage.
+    public let achievedSavingsPercentage: String?
+    /// Whether this model is routed.
+    public let routed: Bool?
+    /// Original model name.
+    public let originalModel: String?
+
+    public init(
+        id: String,
+        category: String? = nil,
+        requestCount: Int? = nil,
+        tokenCount: TokenCount? = nil,
+        costs: SavingsItemCosts? = nil,
+        recommendedModelCosts: RecommendedModelCosts? = nil,
+        originalCost: String? = nil,
+        achievedSavings: String? = nil,
+        achievedSavingsPercentage: String? = nil,
+        routed: Bool? = nil,
+        originalModel: String? = nil
+    ) {
+        self.id = id
+        self.category = category
+        self.requestCount = requestCount
+        self.tokenCount = tokenCount
+        self.costs = costs
+        self.recommendedModelCosts = recommendedModelCosts
+        self.originalCost = originalCost
+        self.achievedSavings = achievedSavings
+        self.achievedSavingsPercentage = achievedSavingsPercentage
+        self.routed = routed
+        self.originalModel = originalModel
     }
 }
 
@@ -213,6 +358,15 @@ public struct CachedUsageData: Codable, Sendable, Equatable {
     /// Per-model cost breakdown for the period.
     public let modelBreakdown: [ModelCostEntry]
 
+    /// Per-API-key usage breakdown for team/individual scope views.
+    public let keyBreakdown: [APIKeyUsageEntry]
+
+    /// Per-category cost breakdown from the usage report.
+    public let categoryBreakdown: [CategoryCostEntry]
+
+    /// Savings summary: achieved savings, potential savings, percentage.
+    public let savingsSummary: CachedSavingsSummary?
+
     /// When this data was last successfully fetched from the API.
     public let lastUpdated: Date
 
@@ -226,6 +380,9 @@ public struct CachedUsageData: Codable, Sendable, Equatable {
         weekTokensOut: Int,
         weekRequests: Int,
         modelBreakdown: [ModelCostEntry],
+        keyBreakdown: [APIKeyUsageEntry] = [],
+        categoryBreakdown: [CategoryCostEntry] = [],
+        savingsSummary: CachedSavingsSummary? = nil,
         lastUpdated: Date
     ) {
         self.todayCost = todayCost
@@ -237,6 +394,9 @@ public struct CachedUsageData: Codable, Sendable, Equatable {
         self.weekTokensOut = weekTokensOut
         self.weekRequests = weekRequests
         self.modelBreakdown = modelBreakdown
+        self.keyBreakdown = keyBreakdown
+        self.categoryBreakdown = categoryBreakdown
+        self.savingsSummary = savingsSummary
         self.lastUpdated = lastUpdated
     }
 
@@ -269,4 +429,90 @@ public struct ModelCostEntry: Codable, Sendable, Equatable {
     public var costDecimal: Decimal {
         Decimal(string: cost) ?? .zero
     }
+}
+
+/// Per-API-key usage entry for team/individual scope views.
+public struct APIKeyUsageEntry: Codable, Sendable, Equatable {
+    /// API key ID.
+    public let id: String
+    /// Human-readable alias (falls back to truncated ID).
+    public let displayName: String
+    /// Total cost for this key as a string.
+    public let cost: String
+    /// Input tokens for this key.
+    public let tokensIn: Int
+    /// Output tokens for this key.
+    public let tokensOut: Int
+    /// Request count for this key.
+    public let requests: Int
+
+    public init(id: String, displayName: String, cost: String, tokensIn: Int, tokensOut: Int, requests: Int) {
+        self.id = id
+        self.displayName = displayName
+        self.cost = cost
+        self.tokensIn = tokensIn
+        self.tokensOut = tokensOut
+        self.requests = requests
+    }
+
+    /// Parsed cost as Decimal.
+    public var costDecimal: Decimal {
+        Decimal(string: cost) ?? .zero
+    }
+}
+
+/// Per-category cost entry from the usage report's costPerCategory field.
+public struct CategoryCostEntry: Codable, Sendable, Equatable {
+    /// Category name (e.g. "code-generation", "summarization").
+    public let name: String
+    /// Total cost for this category as a string.
+    public let cost: String
+
+    public init(name: String, cost: String) {
+        self.name = name
+        self.cost = cost
+    }
+
+    /// Parsed cost as Decimal.
+    public var costDecimal: Decimal {
+        Decimal(string: cost) ?? .zero
+    }
+}
+
+/// Cached savings summary from the recommendations endpoint.
+public struct CachedSavingsSummary: Codable, Sendable, Equatable {
+    /// Current actual total cost as a string.
+    public let actualCost: String
+    /// Original cost before optimization as a string.
+    public let originalCost: String
+    /// Absolute savings achieved as a string.
+    public let achievedSavings: String
+    /// Savings as a percentage string (e.g., "15.0").
+    public let achievedSavingsPercentage: String
+    /// What costs would be with recommended models.
+    public let recommendedCost: String
+    /// Potential additional savings (recommended vs actual).
+    public let potentialSavings: String
+
+    public init(
+        actualCost: String,
+        originalCost: String,
+        achievedSavings: String,
+        achievedSavingsPercentage: String,
+        recommendedCost: String,
+        potentialSavings: String
+    ) {
+        self.actualCost = actualCost
+        self.originalCost = originalCost
+        self.achievedSavings = achievedSavings
+        self.achievedSavingsPercentage = achievedSavingsPercentage
+        self.recommendedCost = recommendedCost
+        self.potentialSavings = potentialSavings
+    }
+
+    public var achievedSavingsDecimal: Decimal { Decimal(string: achievedSavings) ?? .zero }
+    public var potentialSavingsDecimal: Decimal { Decimal(string: potentialSavings) ?? .zero }
+    public var actualCostDecimal: Decimal { Decimal(string: actualCost) ?? .zero }
+    public var originalCostDecimal: Decimal { Decimal(string: originalCost) ?? .zero }
+    public var recommendedCostDecimal: Decimal { Decimal(string: recommendedCost) ?? .zero }
 }

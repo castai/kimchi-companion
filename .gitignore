@@ -1,6 +1,7 @@
 
 # ── GSD baseline (auto-generated) ──
 .gsd
+.bg-shell
 
 # Swift Package Manager
 .build/

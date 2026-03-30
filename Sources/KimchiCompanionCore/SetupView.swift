@@ -44,7 +44,7 @@ public struct SetupView: View {
                     .multilineTextAlignment(.center)
             }
 
-            Link("Get an API key →", destination: URL(string: "https://console.cast.ai/")!)
+            Link("Get an API key →", destination: URL(string: "https://kimchi.console.cast.ai/")!)
                 .font(.caption)
         }
     }
