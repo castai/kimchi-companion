@@ -195,6 +195,67 @@ jobs:
             build/KimchiCompanion.dmg
             build/KimchiCompanion.dmg.sha256
 
+      - name: Update Homebrew tap
+        if: steps.tag_check.outputs.exists == 'false'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA256=$(cat build/KimchiCompanion.dmg.sha256 | awk '{print $1}')
+
+          echo "→ Updating homebrew-tap with v${VERSION} (sha256: ${SHA256})"
+
+          # Generate the cask formula
+          cat > /tmp/kimchi-companion.rb << CASK
+          cask "kimchi-companion" do
+            version "${VERSION}"
+            sha256 "${SHA256}"
+
+            url "https://github.com/castai/kimchi-companion/releases/download/v#{version}/KimchiCompanion.dmg"
+            name "Kimchi Companion"
+            desc "macOS menu bar companion for CAST AI usage monitoring"
+            homepage "https://github.com/castai/kimchi-companion"
+
+            livecheck do
+              url :url
+              strategy :github_latest
+            end
+
+            depends_on macos: ">= :sonoma"
+
+            app "Kimchi Companion.app"
+
+            zap trash: [
+              "~/Library/Application Support/KimchiCompanion",
+              "~/Library/Preferences/com.castai.kimchi-companion.plist",
+              "~/Library/Caches/com.castai.kimchi-companion",
+            ]
+          end
+          CASK
+
+          # Strip leading whitespace from heredoc
+          sed -i '' 's/^          //' /tmp/kimchi-companion.rb
+
+          # Push to homebrew-tap via GitHub API
+          CONTENT=$(base64 < /tmp/kimchi-companion.rb)
+
+          # Check if file already exists (need SHA for update)
+          EXISTING_SHA=$(gh api repos/castai/homebrew-tap/contents/Casks/kimchi-companion.rb --jq '.sha' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api -X PUT repos/castai/homebrew-tap/contents/Casks/kimchi-companion.rb \
+              -f message="Update kimchi-companion to v${VERSION}" \
+              -f content="$CONTENT" \
+              -f sha="$EXISTING_SHA"
+          else
+            gh api -X PUT repos/castai/homebrew-tap/contents/Casks/kimchi-companion.rb \
+              -f message="Add kimchi-companion v${VERSION}" \
+              -f content="$CONTENT"
+          fi
+
+          echo "  ✓ Homebrew tap updated"
+
       - name: Cleanup keychain
         if: always()
         run: |
