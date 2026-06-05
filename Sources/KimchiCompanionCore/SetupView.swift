@@ -62,15 +62,7 @@ public struct SetupView: View {
 
         switch result {
         case .success:
-            do {
-                try KeychainManager().save(trimmedKey)
-            } catch {
-                errorMessage = "Failed to save API key to Keychain."
-                #if DEBUG
-                print("[SetupView] Keychain save error: \(error)")
-                #endif
-                return
-            }
+            ConfigFileCredentialProvider().write(apiKey: trimmedKey)
             appState.hasAPIKey = true
             appState.isConnected = true
         case .failure(let validationError):

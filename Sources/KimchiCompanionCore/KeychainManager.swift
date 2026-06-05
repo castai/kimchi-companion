@@ -122,6 +122,25 @@ public struct KeychainManager: Sendable {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Import an API key into Keychain only if no entry currently exists.
+    ///
+    /// This is the one-time import used when the companion discovers a credential
+    /// in the kimchi-harness config file but has never stored one in Keychain.
+    /// Idempotent — if a key is already present this is a no-op, so callers can
+    /// safely invoke it without checking first.
+    ///
+    /// - Parameter key: The API key string to store.
+    public func importIfAbsent(_ key: String) throws {
+        // Check if anything exists first.
+        if retrieve() != nil {
+            #if DEBUG
+            print("[KeychainManager] importIfAbsent — key already present, skipping")
+            #endif
+            return
+        }
+        try save(key)
+    }
+
     /// Delete the stored API key from Keychain.
     ///
     /// - Throws: `KeychainError.unexpectedStatus` if deletion fails for a reason other than

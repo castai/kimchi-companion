@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Root view for the MenuBarExtra popover window.
 /// Shows SetupView when no API key is configured,
-/// or the full usage dashboard when connected: scope picker, usage sections,
+/// or the full usage dashboard when connected: org selector, KPI strip,
 /// module breakdown, per-key breakdown, Open Dashboard link, and quit button.
 public struct PopoverContentView: View {
     @Environment(AppState.self) private var appState
@@ -36,25 +36,63 @@ public struct PopoverContentView: View {
             .padding(.top, 8)
         }
         .padding()
-        .frame(minWidth: 320, maxWidth: 320)
+        .frame(minWidth: 320, maxWidth: 500)
     }
 
     // MARK: - Connected State — Full Usage Dashboard
 
     private var usageDashboardView: some View {
-        @Bindable var state = appState
+        VStack(spacing: 12) {
+            // Stale indicator banner
+            if appState.isStale {
+                staleBanner
+            }
 
-        return ScrollView(.vertical, showsIndicators: false) {
-            VStack(spacing: 12) {
-                // Stale indicator banner
-                if appState.isStale {
-                    staleBanner
+            // Organization picker
+            OrganizationPicker(
+                selectedId: appState.preferencesStore.selectedOrganizationId,
+                organizations: appState.organizations,
+                isLoading: appState.isLoadingOrganizations,
+                onSelect: { id in
+                    appState.selectOrganization(id: id)
                 }
+            )
 
-                // Scope picker: Global / Team / Individual
+            // You / Org toggle (shown only when an org is selected)
+            if appState.preferencesStore.selectedOrganizationId != nil {
+                OverviewTabToggle(
+                    tab: appState.preferencesStore.overviewTab,
+                    onChange: { tab in
+                        appState.preferencesStore.overviewTab = tab
+                        Task { await appState.refreshUsageData() }
+                    }
+                )
+
+                // KPI strip (org-scoped data from analytics API)
+                OverviewKPIStrip(
+                    requests: appState.usageStore.cachedData?.totalRequests ?? 0,
+                    tokens: appState.usageStore.cachedData?.totalTokens ?? 0,
+                    cost: appState.usageStore.todayCost,
+                    activeModels: appState.usageStore.cachedData?.activeModels ?? 0,
+                    requestsTrend: appState.usageStore.cachedData?.requestsTrend,
+                    costTrend: appState.usageStore.cachedData?.costTrend,
+                    tokensTrend: appState.usageStore.cachedData?.tokensTrend
+                )
+
+                // Token usage chart + Top models (org-scoped)
+                HStack(alignment: .top, spacing: 12) {
+                    TokenUsageChart(data: appState.usageStore.cachedData?.tokenChartData ?? [])
+                        .frame(maxWidth: .infinity)
+                    TopModelsPanel(
+                        models: Array((appState.usageStore.cachedData?.topModels ?? []).prefix(5)),
+                        totalRequests: appState.usageStore.cachedData?.totalRequests ?? 0
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+            } else {
+                // Personal scope — show the classic scoped dashboard
                 scopePicker
 
-                // Content based on scope
                 switch appState.selectedScope {
                 case .global:
                     globalScopeView
@@ -63,50 +101,50 @@ public struct PopoverContentView: View {
                 case .individual:
                     individualScopeView
                 }
+            }
 
-                // Loading indicator
-                if appState.usageStore.isLoading {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Refreshing…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                // Last updated timestamp
-                if let lastUpdated = appState.usageStore.lastUpdated {
-                    Text("Updated \(lastUpdated, style: .relative) ago")
-                        .font(.caption2)
+            // Loading indicator
+            if appState.usageStore.isLoading {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Refreshing…")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-
-                Divider()
-
-                // Open Dashboard link
-                Button {
-                    NSWorkspace.shared.open(URL(string: "https://kimchi.console.cast.ai")!)
-                } label: {
-                    HStack(spacing: 4) {
-                        Text("Open Dashboard")
-                        Image(systemName: "arrow.up.right")
-                            .font(.caption)
-                    }
-                }
-                .buttonStyle(.borderless)
-
-                Divider()
-
-                // Inline settings section
-                SettingsView()
             }
-            .padding(.vertical, 12)
+
+            // Last updated timestamp
+            if let lastUpdated = appState.usageStore.lastUpdated {
+                Text("Updated \(lastUpdated, style: .relative) ago")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            // Open Dashboard link
+            Button {
+                NSWorkspace.shared.open(URL(string: "https://kimchi.console.cast.ai")!)
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Open Dashboard")
+                    Image(systemName: "arrow.up.right")
+                        .font(.caption)
+                }
+            }
+            .buttonStyle(.borderless)
+
+            Divider()
+
+            // Inline settings section
+            SettingsView()
         }
+        .padding(.vertical, 12)
         .task {
             // Trigger refresh when popover appears, then start polling
             await appState.refreshUsageData()
-            if let apiKey = KeychainManager().retrieve() {
+            if let apiKey = ConfigFileCredentialProvider().read() {
                 appState.usageStore.startPolling(
                     intervalSeconds: appState.preferencesStore.refreshInterval.rawValue,
                     apiKey: apiKey
@@ -115,7 +153,7 @@ public struct PopoverContentView: View {
         }
         .onChange(of: appState.preferencesStore.refreshInterval) { _, newInterval in
             // Restart polling with the new interval
-            if let apiKey = KeychainManager().retrieve() {
+            if let apiKey = ConfigFileCredentialProvider().read() {
                 appState.usageStore.startPolling(
                     intervalSeconds: newInterval.rawValue,
                     apiKey: apiKey
@@ -124,11 +162,24 @@ public struct PopoverContentView: View {
         }
     }
 
+    // MARK: - Overview Tab Toggle
+
+    private func OverviewTabToggle(tab: PreferencesStore.OverviewTab, onChange: @escaping (PreferencesStore.OverviewTab) -> Void) -> some View {
+        Picker("Tab", selection: Binding(
+            get: { tab },
+            set: { onChange($0) }
+        )) {
+            Text("You").tag(PreferencesStore.OverviewTab.you)
+            Text("Org").tag(PreferencesStore.OverviewTab.org)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
     // MARK: - Scope Picker
 
     private var scopePicker: some View {
         @Bindable var state = appState
-
         return Picker("Scope", selection: $state.selectedScope) {
             ForEach(UsageScope.allCases) { scope in
                 Text(scope.displayName).tag(scope)
@@ -244,7 +295,6 @@ public struct PopoverContentView: View {
 
     private func keyPicker(keys: [APIKeyUsageEntry]) -> some View {
         @Bindable var state = appState
-
         return Picker("API Key", selection: $state.selectedKeyId) {
             Text("Select key…").tag(nil as String?)
             ForEach(keys, id: \.id) { key in

@@ -329,6 +329,66 @@ public struct RecommendationsItem: Codable, Sendable, Equatable {
     }
 }
 
+// MARK: - Analytics API Response (modern /ai-optimizer/v1beta/analytics)
+
+/// Response from `GET /ai-optimizer/v1beta/analytics`.
+/// Used with inferUserFromApiKey=true to get user-scoped data.
+/// Replaces the deprecated /v1/llm/.../reports/* endpoints.
+public struct AnalyticsResponse: Codable, Sendable {
+    /// Cost breakdown by model.
+    public let cost: AnalyticsCost?
+    /// Total cost across all models.
+    public var totalCost: Decimal {
+        cost?.items.first?.models.first.flatMap { Decimal(string: $0.totalCost) } ?? .zero
+    }
+    /// Total input tokens — computed from analytics cost data.
+    public var totalInputTokens: Int {
+        costFromTokens()
+    }
+
+    /// Total output tokens — computed from analytics cost data.
+    public var totalOutputTokens: Int { 0 }
+
+    private func costFromTokens() -> Int {
+        guard let item = cost?.items.first,
+              let model = item.models.first else { return 0 }
+        let inputCost = Decimal(string: model.inputTokenCost) ?? .zero
+        let totalCost = Decimal(string: model.totalCost) ?? .zero
+        guard inputCost > 0 else { return 0 }
+        let tokens = totalCost / inputCost * 1_000_000
+        return Int(NSDecimalNumber(decimal: tokens).doubleValue)
+    }
+}
+
+public struct AnalyticsCost: Codable, Sendable {
+    public let items: [AnalyticsCostItem]
+}
+
+public struct AnalyticsCostItem: Codable, Sendable {
+    public let executionTime: String
+    public let models: [AnalyticsModelCost]
+}
+
+public struct AnalyticsModelCost: Codable, Sendable {
+    public let model: String
+    public let provider: String
+    public let castaiApiKey: String
+    public let providerName: String
+    public let totalCost: String
+    public let totalCostPerMillionTokens: String
+    public let castaiApiKeyMetadata: AnalyticsApiKeyMetadata?
+    public let inputTokenCost: String
+    public let outputTokenCost: String
+}
+
+public struct AnalyticsApiKeyMetadata: Codable, Sendable {
+    public let id: String
+    public let name: String
+    public let ownerType: String
+    public let ownerId: String
+    public let ownerEmail: String
+}
+
 // MARK: - Cached Usage Data
 
 /// Combined usage data from both API endpoints, shaped for UI display and cache persistence.
@@ -367,6 +427,24 @@ public struct CachedUsageData: Codable, Sendable, Equatable {
     /// Savings summary: achieved savings, potential savings, percentage.
     public let savingsSummary: CachedSavingsSummary?
 
+    /// Total request count for the period (populated in Phase 3 from analytics response).
+    public let totalRequests: Int
+    /// Total token count (input + output) for the period.
+    public let totalTokens: Int
+    /// Number of distinct models used in the period.
+    public let activeModels: Int
+    /// Percentage change in requests vs previous period (positive = increase).
+    public let requestsTrend: Double?
+    /// Percentage change in cost vs previous period.
+    public let costTrend: Double?
+    /// Percentage change in tokens vs previous period.
+    public let tokensTrend: Double?
+
+    /// Token chart data: one point per (date, model) pair — last 7 days.
+    public let tokenChartData: [TokenChartPoint]
+    /// Top models by request count — last 7 days.
+    public let topModels: [TopModelRow]
+
     /// When this data was last successfully fetched from the API.
     public let lastUpdated: Date
 
@@ -383,6 +461,14 @@ public struct CachedUsageData: Codable, Sendable, Equatable {
         keyBreakdown: [APIKeyUsageEntry] = [],
         categoryBreakdown: [CategoryCostEntry] = [],
         savingsSummary: CachedSavingsSummary? = nil,
+        totalRequests: Int = 0,
+        totalTokens: Int = 0,
+        activeModels: Int = 0,
+        requestsTrend: Double? = nil,
+        costTrend: Double? = nil,
+        tokensTrend: Double? = nil,
+        tokenChartData: [TokenChartPoint] = [],
+        topModels: [TopModelRow] = [],
         lastUpdated: Date
     ) {
         self.todayCost = todayCost
@@ -397,6 +483,14 @@ public struct CachedUsageData: Codable, Sendable, Equatable {
         self.keyBreakdown = keyBreakdown
         self.categoryBreakdown = categoryBreakdown
         self.savingsSummary = savingsSummary
+        self.totalRequests = totalRequests
+        self.totalTokens = totalTokens
+        self.activeModels = activeModels
+        self.requestsTrend = requestsTrend
+        self.costTrend = costTrend
+        self.tokensTrend = tokensTrend
+        self.tokenChartData = tokenChartData
+        self.topModels = topModels
         self.lastUpdated = lastUpdated
     }
 
@@ -410,6 +504,33 @@ public struct CachedUsageData: Codable, Sendable, Equatable {
     /// Parsed week cost as Decimal. Returns 0 if the string is malformed.
     public var weekCostDecimal: Decimal {
         Decimal(string: weekCost) ?? .zero
+    }
+
+    // MARK: - Formatted KPI Helpers
+
+    /// Compact-formatted total requests (e.g. "1.2M", "3.4K").
+    public var formattedTotalRequests: String {
+        formatCompact(totalRequests)
+    }
+
+    /// Compact-formatted total tokens (e.g. "1.2M", "3.4K").
+    public var formattedTotalTokens: String {
+        formatCompact(totalTokens)
+    }
+
+    /// Active model count as a plain string.
+    public var formattedActiveModels: String {
+        "\(activeModels)"
+    }
+
+    private func formatCompact(_ value: Int) -> String {
+        if value >= 1_000_000 {
+            return String(format: "%.1fM", Double(value) / 1_000_000.0)
+        } else if value >= 1_000 {
+            return String(format: "%.1fK", Double(value) / 1_000.0)
+        } else {
+            return "\(value)"
+        }
     }
 }
 

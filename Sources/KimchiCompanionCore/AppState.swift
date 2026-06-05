@@ -6,6 +6,14 @@ import Observation
 @Observable
 @MainActor
 public final class AppState {
+    // MARK: - Organization State
+
+    /// All organizations the authenticated user belongs to.
+    public var organizations: [Organization] = []
+
+    /// Whether organizations are currently being fetched.
+    public var isLoadingOrganizations: Bool = false
+
     // MARK: - Menu Bar Display
 
     /// Current cost text shown in the menu bar label.
@@ -13,7 +21,7 @@ public final class AppState {
     public var displayCost: String = "$0.00"
 
     /// Currently selected usage scope for the popover view.
-    public var selectedScope: UsageScope = .global
+    public var selectedScope: UsageScope = .individual
 
     /// Currently selected individual API key ID (when scope is .individual).
     public var selectedKeyId: String?
@@ -71,13 +79,18 @@ public final class AppState {
 
     // MARK: - Initialization
 
-    /// Check Keychain on launch to restore persisted API key state.
+    /// Check config file on launch to restore persisted API key state.
     public init() {
-        if KeychainManager().retrieve() != nil {
+        let configProvider = ConfigFileCredentialProvider()
+        if configProvider.read() != nil {
             hasAPIKey = true
             isConnected = true
             // Load cached data from disk immediately (before any network call)
             usageStore.loadCachedData()
+            // Fetch organizations for the org selector
+            Task {
+                await fetchOrganizations()
+            }
             if let cached = usageStore.cachedData {
                 displayCost = usageStore.formattedTodayCost
                 isStale = usageStore.isStale
@@ -86,7 +99,7 @@ public final class AppState {
                 #endif
             } else {
                 #if DEBUG
-                print("[AppState] init — restored API key from Keychain, no cache on disk")
+                print("[AppState] init — restored API key from config file, no cache on disk")
                 #endif
             }
             // Trigger initial data refresh
@@ -95,30 +108,91 @@ public final class AppState {
             }
         } else {
             #if DEBUG
-            print("[AppState] init — no API key found in Keychain")
+            print("[AppState] init — no API key found in config file")
             #endif
         }
     }
 
-    // MARK: - Usage Data Refresh
+    // MARK: - Organizations
 
-    /// Read the API key from Keychain and refresh usage data.
-    /// Updates displayCost and isStale from UsageStore state after refresh.
-    public func refreshUsageData() async {
-        guard let apiKey = KeychainManager().retrieve() else {
+    /// Fetches the list of organizations the user belongs to.
+    /// Requires an API key to be present in the config file.
+    public func fetchOrganizations() async {
+        guard let apiKey = ConfigFileCredentialProvider().read() else {
             #if DEBUG
-            print("[AppState] refreshUsageData — no API key in Keychain, skipping")
+            print("[AppState] fetchOrganizations — no API key in config file, skipping")
             #endif
             return
         }
 
-        await usageStore.refresh(apiKey: apiKey)
+        isLoadingOrganizations = true
+        defer { isLoadingOrganizations = false }
+
+        do {
+            let response = try await CastAPIClient.fetchOrganizations(apiKey: apiKey)
+            self.organizations = response.organizations
+            #if DEBUG
+            print("[AppState] fetchOrganizations — loaded \(response.organizations.count) organizations")
+            #endif
+        } catch {
+            #if DEBUG
+            print("[AppState] fetchOrganizations — error: \(error)")
+            #endif
+        }
+    }
+
+    /// Sets the currently selected organization and persists the choice.
+    /// TODO: Wire this to usageStore.refresh(apiKey:organizationId:) once UsageStore
+    /// supports organizationId filtering (Phase 3).
+    public func selectOrganization(id: String?) {
+        preferencesStore.selectedOrganizationId = id
+        #if DEBUG
+        print("[AppState] selectOrganization — selected \(id ?? "nil")")
+        #endif
+    }
+
+    // MARK: - Usage Data Refresh
+
+    /// Read the API key from config file and refresh usage data.
+    /// Updates displayCost and isStale from UsageStore state after refresh.
+    public func refreshUsageData() async {
+        guard let apiKey = ConfigFileCredentialProvider().read() else {
+            #if DEBUG
+            print("[AppState] refreshUsageData — no API key in config file, skipping")
+            #endif
+            return
+        }
+
+        await usageStore.refresh(
+            apiKey: apiKey,
+            organizationId: preferencesStore.selectedOrganizationId,
+            isUserScoped: preferencesStore.overviewTab == .you
+        )
         syncFromUsageStore()
     }
 
     /// Sync AppState display properties from UsageStore.
+    /// When a key is selected (individual scope), menu bar shows that key's cost.
     private func syncFromUsageStore() {
-        displayCost = usageStore.formattedTodayCost
+        // Compute individual key cost for menu bar label
+        let keyCost = individualKeyCost()
+        displayCost = keyCost ?? usageStore.formattedTodayCost
         isStale = usageStore.isStale
+    }
+
+    /// Cost of the currently selected individual API key.
+    /// Returns nil if no key data available.
+    private func individualKeyCost() -> String? {
+        guard selectedScope == .individual else { return nil }
+        let keys = usageStore.cachedData?.keyBreakdown ?? []
+        guard !keys.isEmpty else { return nil }
+
+        // Use selectedKeyId if set, otherwise first key
+        let id = selectedKeyId ?? keys.first?.id
+        guard let keyId = id,
+              let key = keys.first(where: { $0.id == keyId }) else {
+            return keys.first?.cost
+        }
+        return key.cost
     }
 }
