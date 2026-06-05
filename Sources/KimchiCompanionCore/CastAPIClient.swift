@@ -48,6 +48,15 @@ public struct CastAPIClient: Sendable {
         return decoder
     }()
 
+    /// JSON decoder for endpoints that use camelCase keys (analytics report).
+    /// Unlike the main decoder, this does NOT apply snake_case conversion so
+    /// camelCase keys like `changePercentage` and `totalCost` decode correctly.
+    private static let camelCaseDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .useDefaultKeys
+        return decoder
+    }()
+
     /// Request timeout in seconds.
     private static let timeoutInterval: TimeInterval = 30
 
@@ -131,15 +140,100 @@ public struct CastAPIClient: Sendable {
         return try await performRequest(path: path, queryItems: queryItems, apiKey: apiKey)
     }
 
+    /// Fetch all organizations accessible with the given API key.
+    ///
+    /// - Parameters:
+    ///   - apiKey: CAST AI API key. Never logged.
+    /// - Returns: Decoded list of organizations.
+    /// - Throws: `APIClientError` on network, auth, server, or decoding failure.
+    public static func fetchOrganizations(apiKey: String) async throws -> ListOrganizationsResponse {
+        let path = "/v1/organizations"
+        return try await performRequest(
+            path: path,
+            queryItems: [],
+            apiKey: apiKey,
+            decoder: decoder
+        )
+    }
+
+    /// Fetch analytics report for a specific organization.
+    ///
+    /// When `isUserScoped` is true, adds `inferUserFromApiKey=true` so the report
+    /// is scoped to the user identified by the API key rather than the org as a whole.
+    ///
+    /// - Parameters:
+    ///   - apiKey: CAST AI API key. Never logged.
+    ///   - orgId: The target organization ID.
+    ///   - startTime: Start of the reporting period (inclusive).
+    ///   - endTime: End of the reporting period (exclusive).
+    ///   - isUserScoped: If true, scope the report to the API key's user.
+    /// - Returns: Decoded analytics report for the organization.
+    /// - Throws: `APIClientError` on network, auth, server, or decoding failure.
+    public static func fetchOrganizationAnalytics(
+        apiKey: String,
+        orgId: String,
+        startTime: Date,
+        endTime: Date,
+        isUserScoped: Bool
+    ) async throws -> GenerateAnalyticsResponse {
+        let path = "/ai-optimizer/v1beta/organizations/\(orgId):generateAnalyticsReport"
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "startTime", value: iso8601String(from: startTime)),
+            URLQueryItem(name: "endTime", value: iso8601String(from: endTime)),
+        ]
+        if isUserScoped {
+            queryItems.append(URLQueryItem(name: "inferUserFromApiKey", value: "true"))
+        }
+        return try await performRequest(
+            path: path,
+            queryItems: queryItems,
+            apiKey: apiKey,
+            decoder: camelCaseDecoder
+        )
+    }
+
+    /// Fetch analytics data for the authenticated user.
+    ///
+    /// Uses `inferUserFromApiKey=true` so data is scoped to the user who owns
+    /// the API key — matching kimchi-harness behavior.
+    ///
+    /// Replaces the deprecated `/v1/llm/.../reports/*` endpoints.
+    ///
+    /// - Parameters:
+    ///   - apiKey: CAST AI API key. Never logged.
+    ///   - startTime: Start of the reporting period (inclusive).
+    ///   - endTime: End of the reporting period (exclusive).
+    /// - Returns: Decoded analytics response scoped to the authenticated user.
+    /// - Throws: `APIClientError` on network, auth, server, or decoding failure.
+    public static func fetchAnalytics(
+        apiKey: String,
+        startTime: Date,
+        endTime: Date
+    ) async throws -> AnalyticsResponse {
+        let path = "/ai-optimizer/v1beta/analytics"
+        let queryItems = [
+            URLQueryItem(name: "startTime", value: iso8601String(from: startTime)),
+            URLQueryItem(name: "endTime", value: iso8601String(from: endTime)),
+            URLQueryItem(name: "inferUserFromApiKey", value: "true"),
+        ]
+        return try await performRequest(path: path, queryItems: queryItems, apiKey: apiKey)
+    }
+
+    // MARK: - Helpers
+
+    private static func iso8601String(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
     // MARK: - Internal
 
     /// Build ISO 8601 query items for the time range parameters.
     private static func timeRangeQueryItems(from: Date, to: Date) -> [URLQueryItem] {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
         return [
-            URLQueryItem(name: "fromTime", value: formatter.string(from: from)),
-            URLQueryItem(name: "toTime", value: formatter.string(from: to)),
+            URLQueryItem(name: "fromTime", value: iso8601String(from: from)),
+            URLQueryItem(name: "toTime", value: iso8601String(from: to)),
         ]
     }
 
@@ -147,7 +241,8 @@ public struct CastAPIClient: Sendable {
     private static func performRequest<T: Decodable & Sendable>(
         path: String,
         queryItems: [URLQueryItem],
-        apiKey: String
+        apiKey: String,
+        decoder: JSONDecoder = decoder
     ) async throws -> T {
         // Build URL with query parameters
         guard var components = URLComponents(string: baseURL + path) else {
@@ -162,7 +257,7 @@ public struct CastAPIClient: Sendable {
         // Build request
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = timeoutInterval
 
         #if DEBUG

@@ -137,8 +137,11 @@ public final class UsageStore {
     /// writes cache to disk, and updates state. On failure, sets stale and preserves
     /// existing cached data.
     ///
-    /// - Parameter apiKey: CAST AI API key. Never logged.
-    public func refresh(apiKey: String) async {
+    /// - Parameters:
+    ///   - apiKey: CAST AI API key. Never logged.
+    ///   - organizationId: If set, use org-scoped analytics endpoint; otherwise user-scoped.
+    ///   - isUserScoped: When true, scope org-scoped data to the authenticated user.
+    public func refresh(apiKey: String, organizationId: String? = nil, isUserScoped: Bool = false) async {
         isLoading = true
         defer { isLoading = false }
 
@@ -158,71 +161,73 @@ public final class UsageStore {
         let weekComponents = utcCalendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
         let weekStart = utcCalendar.date(from: weekComponents) ?? todayStart
 
-        // Fetch all endpoints concurrently
-        // Usage report is called twice: once for today, once for the week
+        // Primary: analytics API with user scoping (matches harness behavior).
+        // Falls back to deprecated endpoints if analytics fails.
+        var analyticsResponse: AnalyticsResponse?
         var todayUsageReport: UsageReportResponse?
         var weekUsageReport: UsageReportResponse?
         var savingsReport: SavingsReportResponse?
         var recommendationsReport: RecommendationsReportResponse?
         var fetchError: Error?
 
+        var orgAnalyticsResponse: GenerateAnalyticsResponse?
+
         do {
-            async let todayUsageTask = CastAPIClient.fetchUsageReport(
-                apiKey: apiKey, from: todayStart, to: now
-            )
-            async let weekUsageTask = CastAPIClient.fetchUsageReport(
-                apiKey: apiKey, from: weekStart, to: now
-            )
-            async let savingsTask = CastAPIClient.fetchSavingsReport(
-                apiKey: apiKey, from: weekStart, to: now
-            )
-            async let recsTask = CastAPIClient.fetchRecommendationsReport(
-                apiKey: apiKey, from: weekStart, to: now
-            )
-
-            do {
-                todayUsageReport = try await todayUsageTask
-            } catch {
-                fetchError = error
+            if let orgId = organizationId {
+                // Org-scoped analytics endpoint
+                orgAnalyticsResponse = try await CastAPIClient.fetchOrganizationAnalytics(
+                    apiKey: apiKey, orgId: orgId, startTime: weekStart, endTime: now,
+                    isUserScoped: isUserScoped
+                )
                 #if DEBUG
-                print("[UsageStore] today usage report fetch failed: \(error.localizedDescription)")
+                print("[UsageStore] org-scoped analytics API succeeded — orgId=\(orgId.prefix(8))…, isUserScoped=\(isUserScoped)")
+                #endif
+            } else {
+                // User-scoped analytics API
+                analyticsResponse = try await CastAPIClient.fetchAnalytics(
+                    apiKey: apiKey, startTime: weekStart, endTime: now
+                )
+                #if DEBUG
+                print("[UsageStore] analytics API succeeded — user-scoped data")
                 #endif
             }
+        } catch {
+            fetchError = error
+            #if DEBUG
+            print("[UsageStore] analytics API failed, falling back to deprecated endpoints: \(error.localizedDescription)")
+            #endif
 
+            // Fallback: fetch deprecated endpoints concurrently
             do {
-                weekUsageReport = try await weekUsageTask
-            } catch {
-                fetchError = error
-                #if DEBUG
-                print("[UsageStore] week usage report fetch failed: \(error.localizedDescription)")
-                #endif
-            }
+                async let todayTask = CastAPIClient.fetchUsageReport(
+                    apiKey: apiKey, from: todayStart, to: now
+                )
+                async let weekTask = CastAPIClient.fetchUsageReport(
+                    apiKey: apiKey, from: weekStart, to: now
+                )
+                async let savingsTask = CastAPIClient.fetchSavingsReport(
+                    apiKey: apiKey, from: weekStart, to: now
+                )
+                async let recsTask = CastAPIClient.fetchRecommendationsReport(
+                    apiKey: apiKey, from: weekStart, to: now
+                )
 
-            do {
-                savingsReport = try await savingsTask
-            } catch {
-                fetchError = error
-                #if DEBUG
-                print("[UsageStore] savings report fetch failed: \(error.localizedDescription)")
-                #endif
-            }
-
-            do {
-                recommendationsReport = try await recsTask
-            } catch {
-                // Recommendations is non-critical
-                #if DEBUG
-                print("[UsageStore] recommendations fetch failed: \(error.localizedDescription)")
-                #endif
+                var localError: Error?
+                do { todayUsageReport = try await todayTask } catch { localError = error }
+                do { weekUsageReport = try await weekTask } catch { localError = error }
+                do { savingsReport = try await savingsTask } catch { localError = error }
+                do { recommendationsReport = try await recsTask } catch { /* non-critical */ }
+                fetchError = localError
             }
         }
 
-        // If both usage reports failed, mark stale and bail
-        if todayUsageReport == nil && weekUsageReport == nil {
+        // If analytics succeeded, we have data. Otherwise check fallback.
+        let hasData = analyticsResponse != nil || todayUsageReport != nil || weekUsageReport != nil
+        if !hasData {
             isStale = true
-            lastError = fetchError?.localizedDescription ?? "Usage API calls failed"
+            lastError = fetchError?.localizedDescription ?? "All API calls failed"
             #if DEBUG
-            print("[UsageStore] fetch failure — usage endpoints failed, isStale=true")
+            print("[UsageStore] fetch failure — all endpoints failed, isStale=true")
             #endif
             return
         }
@@ -268,6 +273,8 @@ public final class UsageStore {
 
         // Merge responses into CachedUsageData
         let data = mergeResponses(
+            analytics: analyticsResponse,
+            orgAnalytics: orgAnalyticsResponse,
             todayUsage: todayUsageReport,
             weekUsage: weekUsageReport,
             savings: savingsReport,
@@ -349,8 +356,13 @@ public final class UsageStore {
 
     // MARK: - Response Merging
 
-    /// Merge today usage, week usage, savings, recommendations, and per-key data into cached structure.
+    /// Merge analytics and/or deprecated API responses into cached structure.
+    ///
+    /// Priority: orgAnalytics (org-scoped) > analytics (user-scoped) > deprecated endpoints.
+    /// KPI fields are populated from orgAnalytics when available, otherwise defaults.
     private func mergeResponses(
+        analytics: AnalyticsResponse?,
+        orgAnalytics: GenerateAnalyticsResponse?,
         todayUsage: UsageReportResponse?,
         weekUsage: UsageReportResponse?,
         savings: SavingsReportResponse?,
@@ -358,42 +370,116 @@ public final class UsageStore {
         perKeyUsage: [String: APIKeyUsageReportResponse],
         now: Date
     ) -> CachedUsageData {
-        // Today's cost from today's usage report: sum of all items' daily costs
-        let todayCostDecimal = todayUsage?.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal } ?? .zero
-
-        // Week cost from week's usage report: sum of all items' daily costs
-        let weekCostDecimal = weekUsage?.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal } ?? .zero
-
-        // Token counts: aggregate from per-key usage reports (most accurate source)
-        // Falls back to savings report if per-key data is empty
+        // ── Costs, model breakdown, key breakdown ─────────────────────────────────
+        var todayCostDecimal: Decimal = .zero
+        var weekCostDecimal: Decimal = .zero
+        var modelBreakdown: [ModelCostEntry] = []
+        var keyBreakdown: [APIKeyUsageEntry] = []
         var weekTokensIn = 0
         var weekTokensOut = 0
         var weekRequests = 0
 
-        if !perKeyUsage.isEmpty {
-            for (_, report) in perKeyUsage {
-                for item in report.items {
-                    weekTokensIn += item.tokenCount?.in ?? 0
-                    weekTokensOut += item.tokenCount?.out ?? 0
-                    weekRequests += item.requestCount ?? 0
+        if let analytics = analytics {
+            // Primary path: use analytics API data (user-scoped via inferUserFromApiKey).
+            weekCostDecimal = analytics.totalCost
+            todayCostDecimal = analytics.totalCost
+
+            let allModels = analytics.cost?.items.first?.models ?? []
+            modelBreakdown = allModels.map {
+                ModelCostEntry(name: $0.model, cost: $0.totalCost)
+            }.sorted { $0.costDecimal > $1.costDecimal }
+
+            // Per-key breakdown from castaiApiKeyMetadata.
+            var keyTotals: [String: (cost: Decimal, displayName: String)] = [:]
+            for model in allModels {
+                let keyId = model.castaiApiKey
+                let displayName = model.castaiApiKeyMetadata?.name
+                    ?? model.castaiApiKeyMetadata?.ownerEmail
+                    ?? keyId
+                let modelCost = Decimal(string: model.totalCost) ?? .zero
+                if let existing = keyTotals[keyId] {
+                    keyTotals[keyId] = (existing.cost + modelCost, displayName)
+                } else {
+                    keyTotals[keyId] = (modelCost, displayName)
                 }
             }
-        } else if let savingsItems = savings?.items, !savingsItems.isEmpty {
-            weekTokensIn = savingsItems.reduce(0) { $0 + $1.tokenCount.in }
-            weekTokensOut = savingsItems.reduce(0) { $0 + $1.tokenCount.out }
-            weekRequests = savingsItems.reduce(0) { $0 + $1.requestCount }
+            keyBreakdown = keyTotals.map {
+                APIKeyUsageEntry(id: $0.key, displayName: $0.value.displayName,
+                                 cost: "\($0.value.cost)", tokensIn: 0, tokensOut: 0, requests: 0)
+            }.sorted { $0.costDecimal > $1.costDecimal }
+
+            weekTokensIn = analytics.totalInputTokens
+            weekTokensOut = analytics.totalOutputTokens
+        } else {
+            // Fallback: deprecated endpoints (no user scoping).
+            todayCostDecimal = todayUsage?.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal } ?? .zero
+            weekCostDecimal = weekUsage?.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal } ?? .zero
+
+            if !perKeyUsage.isEmpty {
+                for (_, report) in perKeyUsage {
+                    for item in report.items {
+                        weekTokensIn += item.tokenCount?.in ?? 0
+                        weekTokensOut += item.tokenCount?.out ?? 0
+                        weekRequests += item.requestCount ?? 0
+                    }
+                }
+            } else if let savingsItems = savings?.items, !savingsItems.isEmpty {
+                weekTokensIn = savingsItems.reduce(0) { $0 + $1.tokenCount.in }
+                weekTokensOut = savingsItems.reduce(0) { $0 + $1.tokenCount.out }
+                weekRequests = savingsItems.reduce(0) { $0 + $1.requestCount }
+            }
+
+            // Model breakdown from deprecated endpoints.
+            if let categories = todayUsage?.items.first?.costPerCategory {
+                modelBreakdown = categories.map { ModelCostEntry(name: $0.key, cost: $0.value) }
+                    .sorted { $0.costDecimal > $1.costDecimal }
+            } else if let items = savings?.items, !items.isEmpty {
+                modelBreakdown = items.map {
+                    ModelCostEntry(name: $0.alias ?? $0.id, cost: $0.costs.total)
+                }.sorted { $0.costDecimal > $1.costDecimal }
+            }
+
+            // Key breakdown from deprecated endpoints.
+            if !perKeyUsage.isEmpty {
+                let aliasMap: [String: String] = Dictionary(
+                    uniqueKeysWithValues: (savings?.items ?? []).map { ($0.id, $0.alias ?? $0.id) }
+                )
+                for (keyId, report) in perKeyUsage {
+                    let totalCost = report.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal }
+                    let totalTokensIn = report.items.reduce(0) { $0 + ($1.tokenCount?.in ?? 0) }
+                    let totalTokensOut = report.items.reduce(0) { $0 + ($1.tokenCount?.out ?? 0) }
+                    let totalRequests = report.items.reduce(0) { $0 + ($1.requestCount ?? 0) }
+                    let displayName = aliasMap[keyId] ?? String(keyId.prefix(12))
+                    keyBreakdown.append(APIKeyUsageEntry(
+                        id: keyId, displayName: displayName,
+                        cost: "\(totalCost)",
+                        tokensIn: totalTokensIn, tokensOut: totalTokensOut, requests: totalRequests
+                    ))
+                }
+                keyBreakdown.sort { $0.costDecimal > $1.costDecimal }
+            } else if let items = savings?.items, !items.isEmpty {
+                keyBreakdown = items.map { item in
+                    APIKeyUsageEntry(
+                        id: item.id,
+                        displayName: item.alias ?? String(item.id.prefix(12)),
+                        cost: item.costs.total,
+                        tokensIn: item.tokenCount.in, tokensOut: item.tokenCount.out,
+                        requests: item.requestCount
+                    )
+                }.sorted { $0.costDecimal > $1.costDecimal }
+            }
         }
 
-        // Today's tokens: sum per-key usage items that fall on today only
+        // ── Today's tokens (from per-key reports, filtered to today) ────────────
         var todayTokensIn = 0
         var todayTokensOut = 0
         var todayRequests = 0
 
-        let todayDatePrefix = Self.todayDatePrefix(now)
         if !perKeyUsage.isEmpty {
+            let todayPrefix = Self.todayDatePrefix(now)
             for (_, report) in perKeyUsage {
                 for item in report.items {
-                    if item.timestamp.hasPrefix(todayDatePrefix) {
+                    if item.timestamp.hasPrefix(todayPrefix) {
                         todayTokensIn += item.tokenCount?.in ?? 0
                         todayTokensOut += item.tokenCount?.out ?? 0
                         todayRequests += item.requestCount ?? 0
@@ -401,76 +487,25 @@ public final class UsageStore {
                 }
             }
         } else {
-            // Fallback: use week totals (same as before)
             todayTokensIn = weekTokensIn
             todayTokensOut = weekTokensOut
             todayRequests = weekRequests
         }
 
-        // Model breakdown from today's usage report's per-category or per-key data
-        var breakdown: [ModelCostEntry] = []
-        if let categories = todayUsage?.items.first?.costPerCategory {
-            breakdown = categories.map { ModelCostEntry(name: $0.key, cost: $0.value) }
-                .sorted { ($0.costDecimal) > ($1.costDecimal) }
-        } else if let items = savings?.items, !items.isEmpty {
-            breakdown = items.map {
-                ModelCostEntry(name: $0.alias ?? $0.id, cost: $0.costs.total)
-            }.sorted { $0.costDecimal > $1.costDecimal }
-        }
-
-        // Per-API-key breakdown: prefer per-key usage data, fall back to savings report
-        var keyBreakdown: [APIKeyUsageEntry] = []
-        if !perKeyUsage.isEmpty {
-            // Build from per-key usage + costPerApiKey for display names
-            // Get key aliases from savings report if available
-            let aliasMap: [String: String] = Dictionary(
-                uniqueKeysWithValues: (savings?.items ?? []).map { ($0.id, $0.alias ?? $0.id) }
-            )
-            for (keyId, report) in perKeyUsage {
-                let totalCost = report.items.reduce(Decimal.zero) { $0 + $1.dailyCostDecimal }
-                let totalTokensIn = report.items.reduce(0) { $0 + ($1.tokenCount?.in ?? 0) }
-                let totalTokensOut = report.items.reduce(0) { $0 + ($1.tokenCount?.out ?? 0) }
-                let totalRequests = report.items.reduce(0) { $0 + ($1.requestCount ?? 0) }
-                let displayName = aliasMap[keyId] ?? String(keyId.prefix(12))
-                keyBreakdown.append(APIKeyUsageEntry(
-                    id: keyId,
-                    displayName: displayName,
-                    cost: "\(totalCost)",
-                    tokensIn: totalTokensIn,
-                    tokensOut: totalTokensOut,
-                    requests: totalRequests
-                ))
-            }
-            keyBreakdown.sort { $0.costDecimal > $1.costDecimal }
-        } else if let items = savings?.items, !items.isEmpty {
-            keyBreakdown = items.map { item in
-                let displayName = item.alias ?? String(item.id.prefix(12))
-                return APIKeyUsageEntry(
-                    id: item.id,
-                    displayName: displayName,
-                    cost: item.costs.total,
-                    tokensIn: item.tokenCount.in,
-                    tokensOut: item.tokenCount.out,
-                    requests: item.requestCount
-                )
-            }.sorted { $0.costDecimal > $1.costDecimal }
-        }
-
-        // Category breakdown from week's usage report (aggregated across all daily items)
+        // ── Category breakdown (deprecated endpoints only) ───────────────────────
         var categoryBreakdown: [CategoryCostEntry] = []
         if let items = weekUsage?.items {
-            var categoryTotals: [String: Decimal] = [:]
+            var totals: [String: Decimal] = [:]
             for item in items {
-                for (category, costStr) in (item.costPerCategory ?? [:]) {
-                    let cost = Decimal(string: costStr) ?? .zero
-                    categoryTotals[category, default: .zero] += cost
+                for (cat, costStr) in (item.costPerCategory ?? [:]) {
+                    totals[cat, default: .zero] += Decimal(string: costStr) ?? .zero
                 }
             }
-            categoryBreakdown = categoryTotals.map { CategoryCostEntry(name: $0.key, cost: "\($0.value)") }
+            categoryBreakdown = totals.map { CategoryCostEntry(name: $0.key, cost: "\($0.value)") }
                 .sorted { $0.costDecimal > $1.costDecimal }
         }
 
-        // Savings summary from recommendations report
+        // ── Savings summary ──────────────────────────────────────────────────────
         var savingsSummary: CachedSavingsSummary?
         if let summary = recommendations?.summary {
             let actualCost = summary.costs?.total ?? "0"
@@ -483,38 +518,200 @@ public final class UsageStore {
             let potentialSavings = max(.zero, actualDec - recommendedDec)
 
             savingsSummary = CachedSavingsSummary(
-                actualCost: actualCost,
-                originalCost: originalCost,
-                achievedSavings: achievedSavings,
-                achievedSavingsPercentage: achievedPct,
-                recommendedCost: recommendedCost,
-                potentialSavings: "\(potentialSavings)"
+                actualCost: actualCost, originalCost: originalCost,
+                achievedSavings: achievedSavings, achievedSavingsPercentage: achievedPct,
+                recommendedCost: recommendedCost, potentialSavings: "\(potentialSavings)"
             )
         }
 
+        // ── KPI extraction from org-scoped analytics ─────────────────────────────
+        let kpis: (totalRequests: Int, totalTokens: Int, activeModels: Int,
+                   requestsTrend: Double?, costTrend: Double?, tokensTrend: Double?)
+        if let org = orgAnalytics {
+            kpis = extractKPIs(from: org)
+        } else {
+            kpis = (totalRequests: 0, totalTokens: 0, activeModels: 0,
+                    requestsTrend: nil, costTrend: nil, tokensTrend: nil)
+        }
+
+        // ── Token chart + top models (from org-scoped analytics) ───────────────
+        let tokenChartData: [TokenChartPoint]
+        let topModels: [TopModelRow]
+        if let org = orgAnalytics {
+            tokenChartData = computeTokenChartData(from: org)
+            topModels = computeTopModels(from: org)
+        } else {
+            tokenChartData = []
+            topModels = []
+        }
+
         return CachedUsageData(
-            todayCost: "\(todayCostDecimal)",
-            weekCost: "\(weekCostDecimal)",
-            todayTokensIn: todayTokensIn,
-            todayTokensOut: todayTokensOut,
-            todayRequests: todayRequests,
-            weekTokensIn: weekTokensIn,
-            weekTokensOut: weekTokensOut,
-            weekRequests: weekRequests,
-            modelBreakdown: breakdown,
-            keyBreakdown: keyBreakdown,
-            categoryBreakdown: categoryBreakdown,
-            savingsSummary: savingsSummary,
+            todayCost: "\(todayCostDecimal)", weekCost: "\(weekCostDecimal)",
+            todayTokensIn: todayTokensIn, todayTokensOut: todayTokensOut, todayRequests: todayRequests,
+            weekTokensIn: weekTokensIn, weekTokensOut: weekTokensOut, weekRequests: weekRequests,
+            modelBreakdown: modelBreakdown, keyBreakdown: keyBreakdown,
+            categoryBreakdown: categoryBreakdown, savingsSummary: savingsSummary,
+            totalRequests: kpis.totalRequests,
+            totalTokens: kpis.totalTokens,
+            activeModels: kpis.activeModels,
+            requestsTrend: kpis.requestsTrend,
+            costTrend: kpis.costTrend,
+            tokensTrend: kpis.tokensTrend,
+            tokenChartData: tokenChartData,
+            topModels: topModels,
             lastUpdated: now
         )
     }
 
     // MARK: - Helpers
 
-    /// Returns the UTC date prefix (e.g. "2026-03-20") for filtering today's items from time-series data.
+    /// Returns the UTC date prefix (e.g. "2026-03-20") for filtering today's items.
     private static func todayDatePrefix(_ now: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withFullDate]
-        return formatter.string(from: now)  // "2026-03-20"
+        return formatter.string(from: now)
+    }
+
+    /// Extract KPI tuple from a `GenerateAnalyticsResponse`.
+    ///
+    /// - Requests: sum of all `apiCalls.items[].models[].totalCount`
+    /// - Tokens: sum of `inputTokens` + `outputTokens` items
+    /// - Active models: count of unique model names across apiCalls
+    /// - Trends: `comparison.{apiCalls,cost,tokens}.changePercentage`
+    private func extractKPIs(from response: GenerateAnalyticsResponse) -> (
+        totalRequests: Int,
+        totalTokens: Int,
+        activeModels: Int,
+        requestsTrend: Double?,
+        costTrend: Double?,
+        tokensTrend: Double?
+    ) {
+        // Requests: sum of all model totalCount in apiCalls
+        var totalRequests = 0
+        var allModelNames = Set<String>()
+        if let apiCalls = response.apiCalls {
+            for item in apiCalls.items {
+                for model in item.models {
+                    totalRequests += model.totalCount
+                    allModelNames.insert(model.model)
+                }
+            }
+        }
+
+        // Tokens: sum of inputTokens + outputTokens
+        var totalInputTokens = 0
+        var totalOutputTokens = 0
+        if let inputTokens = response.inputTokens {
+            for item in inputTokens.items {
+                for model in item.models {
+                    totalInputTokens += model.totalCount
+                    allModelNames.insert(model.model)
+                }
+            }
+        }
+        if let outputTokens = response.outputTokens {
+            for item in outputTokens.items {
+                for model in item.models {
+                    totalOutputTokens += model.totalCount
+                    allModelNames.insert(model.model)
+                }
+            }
+        }
+
+        // Cost: sum of all totalCost strings (for trend only — cost is in weekCostDecimal)
+        // Trends from comparison
+        let requestsTrend = response.comparison?.apiCalls?.changePercentage
+        let costTrend = response.comparison?.cost?.changePercentage
+        let tokensTrend = response.comparison?.tokens?.changePercentage
+
+        return (
+            totalRequests: totalRequests,
+            totalTokens: totalInputTokens + totalOutputTokens,
+            activeModels: allModelNames.count,
+            requestsTrend: requestsTrend,
+            costTrend: costTrend,
+            tokensTrend: tokensTrend
+        )
+    }
+
+    // MARK: - Chart & Top Models Helpers
+
+    /// Compute `TokenChartPoint` array from org-scoped analytics.
+    /// Groups inputTokens + outputTokens by date and model, returns last 7 unique dates.
+    private func computeTokenChartData(from response: GenerateAnalyticsResponse) -> [TokenChartPoint] {
+        var dateModelTokens: [String: [String: Int]] = [:]
+        let formatter = ISO8601DateFormatter()
+
+        func processMetric(_ metric: AnalyticsMetric?, multiplier: Int) {
+            guard let metric = metric else { return }
+            for item in metric.items {
+                let dateKey = item.executionTime
+                if dateModelTokens[dateKey] == nil {
+                    dateModelTokens[dateKey] = [:]
+                }
+                for modelCount in item.models {
+                    dateModelTokens[dateKey]?[modelCount.model, default: 0] += modelCount.totalCount * multiplier
+                }
+            }
+        }
+
+        processMetric(response.inputTokens, multiplier: 1)
+        processMetric(response.outputTokens, multiplier: 1)
+
+        // Get last 7 unique dates sorted ascending
+        let sortedDateKeys = dateModelTokens.keys.sorted()
+        let cutoffIndex = max(0, sortedDateKeys.count - 7)
+        let last7Keys = Array(sortedDateKeys[cutoffIndex...])
+
+        var points: [TokenChartPoint] = []
+        for dateKey in last7Keys {
+            guard let parsedDate = formatter.date(from: dateKey),
+                  let models = dateModelTokens[dateKey] else { continue }
+            for (model, tokens) in models {
+                points.append(TokenChartPoint(date: parsedDate, model: model, tokens: tokens))
+            }
+        }
+
+        return points.sorted { ($0.date, $0.model) < ($1.date, $1.model) }
+    }
+
+    /// Compute `[TopModelRow]` from org-scoped analytics.
+    /// Aggregates request counts and token counts per model, sorted descending by requestCount.
+    private func computeTopModels(from response: GenerateAnalyticsResponse) -> [TopModelRow] {
+        var requestCounts: [String: Int] = [:]
+        var tokenCounts: [String: Int] = [:]
+
+        if let apiCalls = response.apiCalls {
+            for item in apiCalls.items {
+                for modelCount in item.models {
+                    requestCounts[modelCount.model, default: 0] += modelCount.totalCount
+                }
+            }
+        }
+
+        func sumTokens(from metric: AnalyticsMetric?) {
+            guard let metric = metric else { return }
+            for item in metric.items {
+                for modelCount in item.models {
+                    tokenCounts[modelCount.model, default: 0] += modelCount.totalCount
+                }
+            }
+        }
+        sumTokens(from: response.inputTokens)
+        sumTokens(from: response.outputTokens)
+
+        let totalRequests = requestCounts.values.reduce(0, +)
+        guard totalRequests > 0 else { return [] }
+
+        return requestCounts
+            .map { model, count in
+                TopModelRow(
+                    name: model,
+                    requestCount: count,
+                    tokens: tokenCounts[model] ?? 0,
+                    sharePct: Double(count) / Double(totalRequests) * 100.0
+                )
+            }
+            .sorted { $0.requestCount > $1.requestCount }
     }
 }

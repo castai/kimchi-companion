@@ -66,23 +66,17 @@ public struct SettingsView: View {
                 removeAPIKey()
             }
         } message: {
-            Text("This will delete your API key from the Keychain and return to the setup screen.")
+            Text("This will delete your API key from the config file and return to the setup screen.")
         }
     }
 
     // MARK: - Actions
 
     private func removeAPIKey() {
-        do {
-            try KeychainManager().delete()
-            #if DEBUG
-            print("[SettingsView] remove API key — keychain entry deleted")
-            #endif
-        } catch {
-            #if DEBUG
-            print("[SettingsView] remove API key — keychain delete failed: \(error.localizedDescription)")
-            #endif
-        }
+        ConfigFileCredentialProvider().clear()
+        #if DEBUG
+        print("[SettingsView] remove API key — config file entry cleared")
+        #endif
 
         appState.usageStore.stopPolling()
         appState.usageStore.cachedData = nil

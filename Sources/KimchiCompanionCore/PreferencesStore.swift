@@ -74,12 +74,31 @@ public enum UsageScope: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 public final class PreferencesStore {
 
+    // MARK: - OverviewTab
+
+    /// Controls the active tab in the overview popover: personal or org-wide.
+    public enum OverviewTab: String, CaseIterable, Identifiable, Sendable {
+        case you
+        case org
+
+        public var id: String { rawValue }
+
+        public var displayName: String {
+            switch self {
+            case .you: return "You"
+            case .org: return "Org"
+            }
+        }
+    }
+
     // MARK: - UserDefaults Keys
 
     private enum Keys {
         static let refreshInterval = "com.kimchicompanion.refreshInterval"
         static let displayMode = "com.kimchicompanion.displayMode"
         static let launchAtLogin = "com.kimchicompanion.launchAtLogin"
+        static let selectedOrganizationId = "com.kimchicompanion.selectedOrganizationId"
+        static let overviewTab = "com.kimchicompanion.overviewTab"
     }
 
     // MARK: - Backing Storage
@@ -117,6 +136,26 @@ public final class PreferencesStore {
         }
     }
 
+    /// Currently selected organization ID for org-scoped overview.
+    public var selectedOrganizationId: String? {
+        didSet {
+            defaults.set(selectedOrganizationId, forKey: Keys.selectedOrganizationId)
+            #if DEBUG
+            print("[PreferencesStore] selectedOrganizationId changed to \(selectedOrganizationId ?? "nil")")
+            #endif
+        }
+    }
+
+    /// Active overview tab (You vs Org) in the popover.
+    public var overviewTab: OverviewTab {
+        didSet {
+            defaults.set(overviewTab.rawValue, forKey: Keys.overviewTab)
+            #if DEBUG
+            print("[PreferencesStore] overviewTab changed to \(overviewTab.displayName)")
+            #endif
+        }
+    }
+
     // MARK: - Initialization
 
     /// Creates a PreferencesStore backed by the given UserDefaults suite.
@@ -135,8 +174,15 @@ public final class PreferencesStore {
         // Read persisted launch-at-login (defaults to false for unset key)
         self.launchAtLogin = defaults.bool(forKey: Keys.launchAtLogin)
 
+        // Read persisted selectedOrganizationId (nil if not set)
+        self.selectedOrganizationId = defaults.string(forKey: Keys.selectedOrganizationId)
+
+        // Read persisted overview tab (defaults to .you)
+        let storedTab = defaults.string(forKey: Keys.overviewTab) ?? ""
+        self.overviewTab = OverviewTab(rawValue: storedTab) ?? .you
+
         #if DEBUG
-        print("[PreferencesStore] init — interval=\(refreshInterval.displayName), mode=\(displayMode.displayName), launchAtLogin=\(launchAtLogin)")
+        print("[PreferencesStore] init — interval=\(refreshInterval.displayName), mode=\(displayMode.displayName), launchAtLogin=\(launchAtLogin), selectedOrganizationId=\(selectedOrganizationId ?? "nil"), overviewTab=\(overviewTab.displayName)")
         #endif
     }
 }
